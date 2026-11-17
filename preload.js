@@ -22,4 +22,11 @@ contextBridge.exposeInMainWorld("notch", {
   onWaStatus: (cb) => ipcRenderer.on("wa-status", (_e, d) => cb(d)),
   onWaQr: (cb) => ipcRenderer.on("wa-qr", (_e, d) => cb(d)),
   onWaEvent: (cb) => ipcRenderer.on("wa-event", (_e, d) => cb(d)),
+
+  // Intro overlay (intro/intro.js)
+  introInfo: () => ipcRenderer.invoke("intro:info"),
+  introDone: () => ipcRenderer.send("intro:done"),
+  introStart: () => ipcRenderer.send("intro:start"),
+  introSkip: () => ipcRenderer.send("intro:skip-req"),
+  onIntroSkip: (cb) => ipcRenderer.on("intro:skip", () => cb()),
 });

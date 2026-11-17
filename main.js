@@ -1,8 +1,9 @@
-const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, clipboard } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, clipboard, globalShortcut } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const { spawn, execFile } = require("child_process");
+const { pathToFileURL } = require("url");
 
 const SERVICE_FILE = path.join(os.homedir(), ".local", "state", "opencode", "service.json");
 const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -13,6 +14,7 @@ const CONFIG_FILE = path.join(APP_DIR, "config.json");
 
 const wa = require("./whatsapp");
 const bridge = require("./bridge");
+const INTRO = require("./intro/intro.config");   // one config: clips + timings
 
 // Dexter's nub is 96x28 r12; the window adds room for the shoulder flares
 // and the idle glow (0 10px 34px), which would otherwise be clipped.
@@ -30,6 +32,14 @@ let mediaChild = null;
 let mediaLine = "";
 let prevActive = null;
 let lastState = null;
+
+// Intro overlay state (see the Intro section below)
+let introWin = null;
+let introOriginY = 80;
+let introEsc = false;
+let introClickChild = null;
+let introClickTimer = null;
+const INTRO_FLAG = path.join(os.tmpdir(), "notch-intro-click.flag");
 
 /* ---------- Config + phone notifications (ntfy.sh) ---------- */
 
@@ -331,6 +341,7 @@ function startHoverWatch() {
   let lastPinned = null;
   hoverTimer = setInterval(() => {
     if (!win || win.isDestroyed()) return;
+    if (introWin && !introWin.isDestroyed()) return;   // intro owns the screen right now
     const b = win.getBounds();
     const p = screen.getCursorScreenPoint();
     const x = p.x - b.x;
@@ -357,6 +368,146 @@ ipcMain.on("rects", (_e, r) => {
     panel: r && r.panel ? r.panel : null,
   };
 });
+
+/* ---------- Intro overlay ----------
+   Fullscreen, borderless, always-on-top, click-through, truly transparent
+   window on the monitor that has the notch. Runs once when the app loads;
+   Ctrl+Alt+N replays it; Esc or a click skips straight to step 4. */
+
+function ilog(msg) {
+  try { fs.appendFileSync(path.join(APP_DIR, "debug.log"), new Date().toISOString() + " " + msg + "\n"); } catch {}
+}
+
+function spawnPsRetry(args, tries = 2) {
+  try {
+    const c = spawn("powershell.exe", args, { windowsHide: true, stdio: "ignore" });
+    c.on("error", (e) => {
+      ilog("INTRO click-watch spawn error: " + e.message + (tries > 1 ? " (retrying)" : ""));
+      if (tries > 1) setTimeout(() => { introClickChild = spawnPsRetry(args, tries - 1); }, 1500);
+    });
+    c.unref();
+    return c;
+  } catch (e) {
+    ilog("INTRO click-watch spawn throw: " + e.message);
+    return null;
+  }
+}
+
+/* The overlay is click-through, so its own renderer can never see a click.
+   A tiny PowerShell poller drops a flag file on left-click; we pick it up. */
+function startClickWatch() {
+  try { fs.unlinkSync(INTRO_FLAG); } catch {}
+  introClickChild = spawnPsRetry(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+    path.join(APP_DIR, "scripts", "click-watch.ps1"), INTRO_FLAG]);
+  introClickTimer = setInterval(() => {
+    try {
+      if (fs.existsSync(INTRO_FLAG)) { fs.unlinkSync(INTRO_FLAG); skipIntro(); }
+    } catch {}
+  }, 90);
+}
+
+function startIntro() {
+  try {
+    if (introWin && !introWin.isDestroyed()) return false;           // already playing
+    const clipAbs = INTRO.clips.map((c) => path.join(APP_DIR, c));
+    if (!clipAbs.every((f) => fs.existsSync(f))) {
+      ilog("INTRO skipped: clip file missing");
+      return false;
+    }
+    const nb = (win && !win.isDestroyed()) ? win.getBounds() : boundsFor(false);
+    const display = screen.getDisplayMatching(nb) || screen.getPrimaryDisplay();
+    const db = display.bounds;
+    introOriginY = Math.round(nb.y + nb.height - db.y);              // notch bottom edge
+
+    introWin = new BrowserWindow({
+      x: db.x, y: db.y, width: db.width, height: db.height,         // fullscreen on the notch's monitor
+      title: "agent-notch-intro",
+      frame: false,
+      transparent: true,
+      resizable: false,
+      movable: false,
+      skipTaskbar: true,
+      alwaysOnTop: true,
+      hasShadow: false,
+      focusable: false,
+      show: false,
+      backgroundColor: "#00000000",                                  // no background colour
+      webPreferences: {
+        preload: path.join(__dirname, "preload.js"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        backgroundThrottling: false,
+      },
+    });
+    introWin.setAlwaysOnTop(true, "screen-saver");
+    introWin.setIgnoreMouseEvents(true, { forward: true });          // click-through: never blocks the mouse
+
+    introWin.webContents.on("console-message", (...args) => {
+      try {
+        const last = args[args.length - 1];
+        const p = last && typeof last === "object" && "message" in last
+          ? last
+          : { level: args[1], message: args[2], line: args[3], sourceId: args[4] };
+        fs.appendFileSync(path.join(APP_DIR, "debug.log"),
+          new Date().toISOString() + " INTRO_CONSOLE " + p.message + "\n");
+      } catch {}
+    });
+    introWin.webContents.on("did-fail-load", (_e, code, desc) => {
+      ilog("INTRO LOAD_FAIL " + code + " " + desc);
+      cleanupIntro();
+    });
+
+    // The shrinking circle lands on the notch, so hide the real one first.
+    if (win && !win.isDestroyed()) { collapse(); win.hide(); }
+
+    introWin.loadFile(path.join(__dirname, "intro", "intro.html"));
+    introWin.once("ready-to-show", () => {
+      if (introWin && !introWin.isDestroyed()) introWin.showInactive();
+    });
+
+    // Esc skips straight to step 4 — global because the overlay is
+    // click-through and unfocusable. Unregistered again in cleanup.
+    try { introEsc = globalShortcut.register(INTRO.skipKey, () => skipIntro()); }
+    catch (e) { introEsc = false; ilog("INTRO esc register failed: " + e.message); }
+
+    startClickWatch();
+    ilog("INTRO start display=" + db.width + "x" + db.height + "@" + db.x + "," + db.y +
+      " originY=" + introOriginY + " esc=" + introEsc);
+    return true;
+  } catch (e) {
+    ilog("INTRO err " + e.message);
+    cleanupIntro();
+    return false;
+  }
+}
+
+function skipIntro() {
+  if (introWin && !introWin.isDestroyed()) introWin.webContents.send("intro:skip");
+}
+
+function cleanupIntro() {
+  if (introEsc) { try { globalShortcut.unregister(INTRO.skipKey); } catch {} introEsc = false; }
+  if (introClickTimer) { clearInterval(introClickTimer); introClickTimer = null; }
+  if (introClickChild) { try { introClickChild.kill(); } catch {} introClickChild = null; }
+  try { fs.unlinkSync(INTRO_FLAG); } catch {}
+  // The circle shrank into the notch — bring it back as the normal UI.
+  if (win && !win.isDestroyed()) { collapse(); win.showInactive(); }
+  if (introWin && !introWin.isDestroyed()) {
+    const w = introWin;
+    introWin = null;
+    try { w.destroy(); } catch {}
+  }
+  ilog("INTRO cleaned up");
+}
+
+ipcMain.handle("intro:info", () => ({
+  config: INTRO,
+  clips: INTRO.clips.map((c) => pathToFileURL(path.join(APP_DIR, c)).href),
+  originY: introOriginY,
+}));
+ipcMain.on("intro:start", () => startIntro());
+ipcMain.on("intro:skip-req", () => skipIntro());
+ipcMain.on("intro:done", () => cleanupIntro());
 
 /* ---------- Autostart ---------- */
 
@@ -480,6 +631,15 @@ app.whenReady().then(async () => {
   // Ensure 24/7: register autostart on first run
   if (!(await regQuery())) await regAdd();
 
+  // Intro: plays once, shortly after the app loads
+  setTimeout(() => startIntro(), 800);
+
+  // Debug: replay the intro on demand
+  try {
+    const ok = globalShortcut.register(INTRO.replayShortcut, () => startIntro());
+    ilog("INTRO replay shortcut " + INTRO.replayShortcut + (ok ? " registered" : " ALREADY TAKEN"));
+  } catch (e) { ilog("INTRO replay shortcut err " + e.message); }
+
   // WhatsApp bridge: OpenCode event stream → chat, replies → prompts
   if (config.whatsappEnabled !== false) {
     bridge.start({
@@ -503,6 +663,14 @@ app.on("window-all-closed", (e) => {
 app.on("before-quit", () => {
   if (mediaChild) { try { mediaChild.kill(); } catch {} }
   if (animTimer) clearInterval(animTimer);
+  if (introClickTimer) clearInterval(introClickTimer);
+  if (introClickChild) { try { introClickChild.kill(); } catch {} }
+  try { fs.unlinkSync(INTRO_FLAG); } catch {}
+  try { globalShortcut.unregisterAll(); } catch {}
+  if (introWin && !introWin.isDestroyed()) { try { introWin.destroy(); } catch {} introWin = null; }
   try { bridge.stop(); } catch {}
   try { wa.disconnect(); } catch {}
 });
+
+// Exposed for programmatic control / tests
+module.exports = { startIntro, skipIntro, cleanupIntro };

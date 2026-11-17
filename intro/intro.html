@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file: 'unsafe-inline'; script-src 'self'; style-src 'self' 'unsafe-inline'; media-src 'self' file:; img-src 'self' data:" />
+  <link rel="stylesheet" href="intro.css" />
+</head>
+<body>
+  <!-- Step 1: three preloaded clips stacked; only the active one is visible.
+       The whole layer fades in over config.fadeInMs. -->
+  <div id="videoLayer">
+    <video id="clip0" muted playsinline preload="auto" disablepictureinpicture></video>
+    <video id="clip1" muted playsinline preload="auto" disablepictureinpicture></video>
+    <video id="clip2" muted playsinline preload="auto" disablepictureinpicture></video>
+  </div>
+
+  <!-- Step 2: white-blue flash at the notch (opacity only) -->
+  <div id="flash"></div>
+
+  <!-- Step 2/4: pure black circle — grows from the notch (ease-in), then
+       shrinks back (ease-out). Animated with transform only: one fixed-size
+       circle scaled from the notch centre, so the compositor does all the
+       work at 60fps and no layout/paint happens during the animation. -->
+  <div id="burst"></div>
+
+  <script src="intro.js"></script>
+</body>
+</html>
