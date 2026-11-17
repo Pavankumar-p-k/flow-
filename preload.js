@@ -1,0 +1,25 @@
+const { contextBridge, ipcRenderer } = require("electron");
+
+contextBridge.exposeInMainWorld("notch", {
+  onState: (cb) => ipcRenderer.on("state", (_e, d) => cb(d)),
+  onMedia: (cb) => ipcRenderer.on("media", (_e, d) => cb(d)),
+  onLayout: (cb) => ipcRenderer.on("layout", (_e, d) => cb(d)),
+  mouseEnter: () => ipcRenderer.send("mouseenter"),
+  mouseLeave: () => ipcRenderer.send("mouseleave"),
+  togglePin: () => ipcRenderer.send("toggle-pin"),
+  forceCollapse: () => ipcRenderer.send("force-collapse"),
+  setMouseIgnore: (v) => ipcRenderer.send("mouse-ignore", v),
+  setRects: (r) => ipcRenderer.send("rects", r),
+  media: (action) => ipcRenderer.send("media", action),
+
+  // WhatsApp bridge
+  waConnect: () => ipcRenderer.send("wa-connect"),
+  waDisconnect: () => ipcRenderer.send("wa-disconnect"),
+  waForget: () => ipcRenderer.send("wa-forget"),
+  waCommand: (t) => ipcRenderer.send("wa-command", t),
+  waStatus: () => ipcRenderer.invoke("wa-status"),
+  waRepos: () => ipcRenderer.invoke("wa-repos"),
+  onWaStatus: (cb) => ipcRenderer.on("wa-status", (_e, d) => cb(d)),
+  onWaQr: (cb) => ipcRenderer.on("wa-qr", (_e, d) => cb(d)),
+  onWaEvent: (cb) => ipcRenderer.on("wa-event", (_e, d) => cb(d)),
+});

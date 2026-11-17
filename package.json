@@ -1,0 +1,16 @@
+{
+  "name": "agent-notch",
+  "version": "1.0.0",
+  "description": "Dynamic Island-style desktop notch for OpenCode agents, tokens and media control",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "electron": "^45.3.3",
+    "qrcode": "^1.5.4"
+  }
+}
