@@ -18,15 +18,32 @@ const STALL_MS = 45000;      // give up early if the reply stopped growing
 
 const PROTOCOL = [
   "PROTOCOL — you are Notchy, a personal assistant the user messages from their phone over WhatsApp.",
-  "They send short free-form lines. Help them find and retrieve files on this Windows PC.",
+  "They send short free-form lines. Help them find and retrieve files on this Windows PC,",
+  "launch apps, control music, and open websites. Understand their natural language — no fixed commands.",
   "Actually search the disk with Glob/Grep/Read. Home: C:\\Users\\peter.",
   "Screenshots: C:\\Users\\peter\\OneDrive\\Pictures\\Screenshots. Blender files usually sit in C:\\Users\\peter\\Documents.",
   "Reply BRIEFLY and plainly — it renders as one chat bubble. No markdown headers, no bullet walls.",
-  "If the user asked for files, end your reply with this block, up to 5 absolute paths that really exist and are under 200MB:",
+  "",
+  "FILES — if the user asked for files, end your reply with this block, up to 5 absolute paths that really exist and are under 200MB:",
   "<files>",
   "C:\\full\\path\\to\\file.ext",
   "</files>",
   "Leave the block out entirely when there is nothing to send. Never invent a path.",
+  "",
+  "ACTIONS — to make the PC do things, put action lines in this block at the very end of your reply:",
+  "<action>",
+  "app:notepad",
+  "</action>",
+  "Action types (one per line, as many as needed):",
+  "- app:NAME  → launch a program by its exe name (notepad, calc, chrome, msedge, spotify, vlc, explorer, code…). To find installed apps, list C:\\Users\\peter\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu and C:\\ProgramData\\Microsoft\\Windows\\Start Menu.",
+  "- media:playpause | media:next | media:prev | media:stop  → media keys, but they ONLY work while a player or browser tab is already playing/paused. There are NO desktop music apps on this PC — music means YouTube in Chrome.",
+  "- browser:URL  → open a URL in the default browser (must include https://). For \"search the web for X\" you may browse yourself and answer in text instead.",
+  "- file:PATH  → open a file or folder with its default app.",
+  "- focus:TITLE  → bring an existing window to the front (substring of its title), e.g. focus:Notepad or focus:Google Chrome.",
+  "MUSIC RECIPE — to play a specific song: a YouTube /results SEARCH page never plays anything, so never emit one for a play request. Instead: (1) use browser tools to find a direct link — browser_navigate to https://www.youtube.com/results?search_query=<song>, then browser_read_links and take the FIRST /watch?v=VIDEO_ID link; (2) emit browser:https://www.youtube.com/watch?v=VIDEO_ID as your action. Chrome autoplays direct watch URLs immediately. One search, first link, done — keep it under ~20 seconds. For pause/next/prev while something is already playing, just emit the media: action.",
+  "SPEED RULE — for app / browser / focus requests, emit the action block IMMEDIATELY and reply in one line. Do NOT run shell commands: shell here is slow and often access-denied. Browser tools are allowed ONLY for the music recipe above and for answering web questions.",
+  "The notch executes actions instantly and reliably — prefer action blocks over shell for launching/opening things.",
+  "After actions, say in one short line what you did (e.g. \"Opened Notepad ✅\").",
 ].join("\n");
 
 let sessionID = null;
@@ -158,6 +175,23 @@ function extractFiles(text) {
   return { reply: clean.replace(/\n{3,}/g, "\n\n").trim(), files: valid.slice(0, MAX_FILES) };
 }
 
+function extractActions(text) {
+  const actions = [];
+  let clean = text;
+  const block = text.match(/<action>\s*([\s\S]*?)\s*<\/action>/i);
+  if (block) {
+    clean = text.replace(block[0], "");
+    for (const line of block[1].split(/\r?\n/)) {
+      const s = line.trim().replace(/^[-*•]\s*/, "");
+      const m = s.match(/^(app|media|browser|file|focus)\s*:\s*(.+)$/i);
+      if (!m) continue;
+      const value = m[2].trim().replace(/^["'`]|["'`]$/g, "");
+      if (value) actions.push({ type: m[1].toLowerCase(), value });
+    }
+  }
+  return { reply: clean.replace(/\n{3,}/g, "\n\n").trim(), actions };
+}
+
 function collectReply(list, t0) {
   const mine = list
     .filter((m) => m.type === "assistant" && (m.time?.created || 0) >= t0)
@@ -174,7 +208,7 @@ function collectReply(list, t0) {
 /* ---------- public API ---------- */
 
 async function ask(userText) {
-  if (busy) return { reply: "Still working on your last request — send that again in a minute.", files: [], busy: true };
+  if (busy) return { reply: "Still working on your last request — send that again in a minute.", files: [], actions: [], busy: true };
   busy = true;
   try {
     const sid = await ensureSession();
@@ -218,17 +252,20 @@ async function ask(userText) {
     }
 
     if (outcome === "timeout" && !lastText) {
-      return { reply: "⏰ That took too long and produced no reply. Try a narrower request.", files: [], error: "timeout" };
+      return { reply: "⏰ That took too long and produced no reply. Try a narrower request.", files: [], actions: [], error: "timeout" };
     }
 
     const finalText = lastText || "";
-    const { reply, files } = extractFiles(finalText);
-    log("done outcome=" + outcome + " chars=" + finalText.length + " files=" + files.length);
+    // Actions first: their file: lines must not be mistaken for <files> paths.
+    const acted = extractActions(finalText);
+    const { reply, files } = extractFiles(acted.reply);
+    const actions = acted.actions;
+    log("done outcome=" + outcome + " chars=" + finalText.length + " files=" + files.length + " actions=" + actions.length);
 
-    if (!reply && !files.length) {
-      return { reply: "🤔 The assistant finished but said nothing. Try rewording.", files: [] };
+    if (!reply && !files.length && !actions.length) {
+      return { reply: "🤔 The assistant finished but said nothing. Try rewording.", files: [], actions: [] };
     }
-    return { reply, files, outcome };
+    return { reply, files, actions, outcome };
   } catch (e) {
     log("ask error: " + e.message);
     const offline = /service unavailable|ENOTFOUND|ECONNREFUSED|fetch failed/i.test(e.message);
@@ -237,6 +274,7 @@ async function ask(userText) {
         ? "⚠️ OpenCode isn't running, so I can't think right now."
         : "⚠️ Assistant error: " + String(e.message).slice(0, 180),
       files: [],
+      actions: [],
       error: e.message,
     };
   } finally {

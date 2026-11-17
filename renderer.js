@@ -285,14 +285,6 @@ $("pin-btn").addEventListener("click", (e) => {
   window.notch.togglePin();
 });
 
-document.querySelectorAll(".shrink-btn").forEach((btn) => {
-  btn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    // minimize: collapse all the way back to the notch
-    window.notch.forceCollapse();
-  });
-});
-
 document.querySelectorAll(".mctrl").forEach((btn) => {
   btn.addEventListener("click", (e) => {
     e.stopPropagation();

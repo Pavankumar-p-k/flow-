@@ -8,6 +8,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { spawn } = require("child_process");
 const repos = require("./repos");
 const assistant = require("./assistant");
 
@@ -156,9 +157,57 @@ const HELP = [
   "prompts — pending approvals",
   "help — this message",
   "",
+  "messages run one at a time, in order (queued if busy)",
+  "",
+  "or just talk naturally:",
+  "\"open notepad\" · \"play music\" · \"next song\"",
+  "\"open github.com\" · \"send me my latest screenshot\"",
+  "",
   "to answer a prompt:  allow / always / reject",
   "or numbered:  2 allow · 1 reject · 1: your answer",
 ].join("\n");
+
+/* ---------- unified FIFO task queue ----------
+   Every incoming message becomes a task. Tasks run strictly one at a time
+   in arrival order — commands, approvals and assistant requests alike —
+   so nothing is rejected while another task is still working, and replies
+   come back in the order the messages arrived. */
+const taskQueue = [];
+let taskRunning = false;
+const QUEUE_MAX = 8;
+
+function enqueue(label, fn) {
+  if (taskQueue.length >= QUEUE_MAX) {
+    try { wa.send("🗑 queue is full (8) — wait for the current tasks to finish, then resend."); } catch {}
+    return;
+  }
+  const waiting = taskRunning || taskQueue.length > 0;
+  taskQueue.push({ label, fn });
+  if (waiting) {
+    log("queue +" + taskQueue.length + " " + label);
+    try { wa.send("⏳ queued #" + taskQueue.length + ": " + label); } catch {}
+  }
+  drainQueue();
+}
+
+async function drainQueue() {
+  if (taskRunning) return;
+  taskRunning = true;
+  try {
+    while (taskQueue.length) {
+      const t = taskQueue.shift();
+      log("queue run " + t.label);
+      try {
+        await t.fn();
+      } catch (e) {
+        log("task error [" + t.label + "]: " + e.message);
+        try { await wa.send("⚠️ failed: " + t.label); } catch {}
+      }
+    }
+  } finally {
+    taskRunning = false;
+  }
+}
 
 /* ---------- incoming WhatsApp messages ---------- */
 
@@ -167,74 +216,172 @@ async function handleIncoming(text) {
   const raw = text.trim();
   // Safety net: never parse our own outbound messages as commands, even if
   // an id mismatch lets an echo through the dedupe in whatsapp.js.
-  if (/^(🔔|📊|📁|🤖|❓|✅|⚠️|❌)/.test(raw)) return;
+  if (/^(🔔|📊|📁|🤖|❓|✅|⚠️|❌|⏳|↩️|🗑)/.test(raw)) return;
   const low = raw.toLowerCase();
-  const state = getState ? getState() : null;
+  const label = raw.slice(0, 44).replace(/\s+/g, " ");
+  const st = () => (getState ? getState() : null);
 
-  // numbered: "<n> allow|always|reject"
+  // numbered: "<n> allow|always|reject>" — re-resolved when it actually runs,
+  // so a prompt answered or cancelled while queued reports accurately.
   let m = raw.match(/^(\d{1,2})\s+(allow|always|reject|approve|deny)\b/i);
   if (m) {
-    const item = findBySeq(Number(m[1]));
-    if (item) return answerPrompt(item, m[2].toLowerCase(), raw);
-    return wa.send("⚠️ #" + m[1] + " is no longer pending.");
+    const n = Number(m[1]);
+    const choice = m[2].toLowerCase();
+    return enqueue("#" + n + " " + choice, async () => {
+      const item = findBySeq(n);
+      if (!item) return wa.send("⚠️ #" + n + " is no longer pending.");
+      return answerPrompt(item, choice, raw);
+    });
   }
 
   // numbered form answer: "<n>: <answer>"
   m = raw.match(/^(\d{1,2})\s*[:\-]\s*([\s\S]+)$/);
   if (m) {
-    const item = findBySeq(Number(m[1]));
-    if (item && item.kind === "form") return answerForm(item, m[2]);
-    if (item) return answerPrompt(item, m[2], raw);
+    const n = Number(m[1]);
+    const ans = m[2];
+    const seen = findBySeq(n);
+    if (seen && seen.kind === "form") {
+      return enqueue("#" + n + " answer", async () => {
+        const item = findBySeq(n);
+        if (!item) return wa.send("⚠️ #" + n + " is no longer pending.");
+        return answerForm(item, ans);
+      });
+    }
+    if (seen) {
+      return enqueue("#" + n + " reply", async () => {
+        const item = findBySeq(n);
+        if (!item) return wa.send("⚠️ #" + n + " is no longer pending.");
+        return answerPrompt(item, ans, raw);
+      });
+    }
+    // no matching prompt — fall through to the normal command/assistant path
   }
 
   switch (low) {
     case "help":
     case "commands":
-      return wa.send(HELP);
+      return enqueue("help", () => wa.send(HELP));
     case "status":
-      return wa.send(fmtStatus(state));
+      return enqueue("status", () => wa.send(fmtStatus(st())));
     case "repos":
     case "git":
-      return wa.send(fmtRepos(await repos.list(true)));
+      return enqueue("repos", async () => wa.send(fmtRepos(await repos.list(true))));
     case "sessions":
-      return wa.send(fmtStatus(state));
+      return enqueue("sessions", () => wa.send(fmtStatus(st())));
     case "prompts":
     case "pending":
-      return wa.send(pending.size ? [...pending.values()].map(describe).join("\n\n") : "✅ no pending prompts");
+      return enqueue("prompts", () =>
+        wa.send(pending.size ? [...pending.values()].map(describe).join("\n\n") : "✅ no pending prompts"));
     case "allow":
     case "approve":
     case "always":
     case "reject":
-    case "deny": {
-      const item = [...pending.values()].find((p) => p.kind === "permission");
-      if (!item) return wa.send("✅ no pending approval.");
-      return answerPrompt(item, low === "approve" ? "allow" : low, raw);
-    }
+    case "deny":
+      return enqueue(low, () => {
+        const item = [...pending.values()].find((p) => p.kind === "permission");
+        if (!item) return wa.send("✅ no pending approval.");
+        return answerPrompt(item, low === "approve" ? "allow" : low, raw);
+      });
     default: {
       // A pending form takes short free-text as its answer.
-      const form = [...pending.values()].find((p) => p.kind === "form");
-      if (form && raw.length <= 300 && !looksLikeRequest(raw)) return answerForm(form, raw);
+      if (raw.length <= 300 && !looksLikeRequest(raw)) {
+        const form = [...pending.values()].find((p) => p.kind === "form");
+        if (form) return enqueue("form answer", () => answerForm(form, raw));
+      }
       // Otherwise treat it as a natural-language request for Notchy.
-      return askAssistant(raw);
+      return enqueue(label, () => askAssistant(raw));
     }
   }
 }
 
 /* Does this read like "go find/do something" rather than a form answer? */
 function looksLikeRequest(s) {
-  return /\b(send|find|get|show|give|search|look|where|which|list|latest|recent|my|me|open|run|check|how|what|can you|please)\b/i.test(s)
+  return /\b(send|find|get|show|give|search|look|where|which|list|latest|recent|my|me|open|run|check|how|what|can you|please|play|pause|music|song|browse|launch|website|url|site|volume|next|prev)\b/i.test(s)
     || s.length > 120;
 }
 
 async function askAssistant(text) {
   if (!assistant) return wa.send(HELP);
   // Acknowledge immediately — the agent can take a minute on a real search.
-  wa.send("🧠 on it — searching your PC…");
+  await wa.send("🧠 on it…");
   log("assistant request: " + text.slice(0, 120).replace(/\n/g, " "));
   const res = await assistant.ask(text);
   for (const chunk of chunkReply(res.reply || "")) await wa.send(chunk);
+  const actions = res.actions || [];
+  if (!res.reply && actions.length) await wa.send("✅ done");
+  for (const a of actions) {
+    const ok = runAction(a);
+    log("action " + a.type + ":" + a.value + " -> " + ok);
+    if (!ok) await wa.send("⚠️ couldn't do that: " + a.type + ":" + a.value);
+  }
   for (const f of res.files || []) {
     await wa.sendFile(f.path, path.basename(f.path));
+  }
+}
+
+/* Execute one <action> line decided by the assistant (natural language in,
+   deterministic action out). Runs in the Electron main process, so it is
+   reliable even when OpenCode's own shell is flaky. */
+function spawnRetry(cmd, args, opts, tries = 2) {
+  try {
+    const c = spawn(cmd, args, opts);
+    c.on("error", (e) => {
+      log("spawn error " + cmd + " (" + e.message + ")" + (tries > 1 ? " — retrying" : ""));
+      if (tries > 1) setTimeout(() => spawnRetry(cmd, args, opts, tries - 1), 1500);
+    });
+    c.unref();
+    return c;
+  } catch (e) {
+    log("spawn throw " + cmd + ": " + e.message);
+    return null;
+  }
+}
+
+function runAction(a) {
+  try {
+    const v = String((a && a.value) || "").trim();
+    const type = String((a && a.type) || "").toLowerCase();
+    if (!v) return false;
+    const detached = { detached: true, stdio: "ignore", windowsHide: true };
+
+    if (type === "media") {
+      if (!/^(playpause|next|prev|stop)$/.test(v)) return false;
+      spawnRetry("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        path.join(__dirname, "scripts", "media-key.ps1"), v], detached);
+      return true;
+    }
+
+    // Prefer Electron's shell API when running inside the app — it calls
+    // ShellExecute in-process (no spawn), so it survives this PC's flaky
+    // process creation.
+    let eshell = null;
+    try { const el = require("electron"); if (el && el.shell) eshell = el.shell; } catch {}
+
+    if (type === "browser") {
+      if (!/^https?:\/\//i.test(v)) return false;
+      if (eshell) { eshell.openExternal(v).catch((e) => log("openExternal failed: " + e.message)); return true; }
+    } else if (type === "file") {
+      if (eshell) { eshell.openPath(v).then((err) => { if (err) log("openPath failed: " + err); }).catch((e) => log("openPath threw: " + e.message)); return true; }
+    } else if (type === "app") {
+      // "start" resolves PATH, App Paths (chrome, msedge…) and .lnk names.
+      const parts = v.split(/\s+/);
+      spawnRetry("cmd.exe", ["/c", "start", "", ...parts], detached);
+      return true;
+    } else if (type === "focus") {
+      spawnRetry("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        path.join(__dirname, "scripts", "focus-window.ps1"), v], detached);
+      return true;
+    }
+    // Plain-node fallbacks for browser/file. cmd's `start` mangles URLs into
+    // about:blank, so use PowerShell Start-Process (verified reliable).
+    if (type === "browser" || type === "file") {
+      spawnRetry("powershell.exe", ["-NoProfile", "-Command", "Start-Process", v], detached);
+      return true;
+    }
+    return false;
+  } catch (e) {
+    log("action failed: " + e.message);
+    return false;
   }
 }
 
@@ -476,4 +623,4 @@ function stop() {
   try { if (abort) abort.abort(); } catch {}
 }
 
-module.exports = { start, stop, handleIncoming, pending, pushPending };
+module.exports = { start, stop, handleIncoming, pending, pushPending, runAction };

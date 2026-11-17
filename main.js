@@ -233,9 +233,7 @@ ipcMain.on("media", (_e, action) => {
 
 ipcMain.on("mouseenter", () => expand());
 ipcMain.on("mouseleave", () => {
-  if (pinned) return;
-  if (leaveTimer) clearTimeout(leaveTimer);
-  leaveTimer = setTimeout(() => { if (!pinned) collapse(); }, 260);
+  scheduleCollapse();
 });
 ipcMain.on("toggle-pin", () => {
   pinned = !pinned;
@@ -320,13 +318,17 @@ function inRect(r, x, y) {
 }
 
 function scheduleCollapse() {
-  if (pinned) return;
-  if (leaveTimer) clearTimeout(leaveTimer);
-  leaveTimer = setTimeout(() => { if (!pinned) collapse(); }, 260);
+  if (pinned || leaveTimer) return; // set-once: the 100ms hover ticks must not reset it or it never fires
+  leaveTimer = setTimeout(() => {
+    leaveTimer = null;
+    if (!pinned) collapse();
+  }, 260);
 }
 
 function startHoverWatch() {
   if (hoverTimer) return;
+  let lastOver = null;
+  let lastPinned = null;
   hoverTimer = setInterval(() => {
     if (!win || win.isDestroyed()) return;
     const b = win.getBounds();
@@ -334,6 +336,15 @@ function startHoverWatch() {
     const x = p.x - b.x;
     const y = p.y - b.y;
     const over = inRect(hitRects.pill, x, y) || inRect(hitRects.panel, x, y);
+    if (over !== lastOver || pinned !== lastPinned) {
+      lastOver = over;
+      lastPinned = pinned;
+      try {
+        fs.appendFileSync(path.join(APP_DIR, "debug.log"),
+          new Date().toISOString() + " HOVER over=" + over + " pinned=" + pinned +
+          " local=" + Math.round(x) + "," + Math.round(y) + " rects=" + JSON.stringify(hitRects) + "\n");
+      } catch {}
+    }
     applyMouseIgnore(!over);
     if (over) expand();
     else scheduleCollapse();
