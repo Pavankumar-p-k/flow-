@@ -382,6 +382,43 @@ function ilog(msg) {
   try { fs.appendFileSync(path.join(APP_DIR, "debug.log"), new Date().toISOString() + " " + msg + "\n"); } catch {}
 }
 
+/* #9 log rotation — POLL writes every 4s, so debug.log grows forever.
+   Checked periodically: if it passes 5MB, keep only the last ~2000 lines. */
+const DEBUG_FILE = path.join(APP_DIR, "debug.log");
+const DEBUG_MAX = 5 * 1024 * 1024;
+let lastLogCheck = 0;
+function rotateLogIfHuge() {
+  try {
+    const now = Date.now();
+    if (now - lastLogCheck < 60000) return; // once a minute at most
+    lastLogCheck = now;
+    const st = fs.statSync(DEBUG_FILE);
+    if (st.size <= DEBUG_MAX) return;
+    const lines = fs.readFileSync(DEBUG_FILE, "utf8").split(/\r?\n/);
+    const tail = lines.slice(-2000).join("\n");
+    fs.writeFileSync(DEBUG_FILE, tail);
+    ilog("LOG rotated — was " + Math.round(st.size / 1024) + "KB, kept last 2000 lines");
+  } catch {}
+}
+
+/* #12 — our screenshots pile up forever. Delete notch-*.png older than
+   7 days (only OUR files; user screenshots are never touched). */
+const SHOT_DIR = "C:\\Users\\peter\\OneDrive\\Pictures\\Screenshots";
+function cleanOldScreenshots() {
+  try {
+    const cut = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    let removed = 0;
+    for (const f of fs.readdirSync(SHOT_DIR)) {
+      if (!/^notch-\d{4}-\d{2}-\d{2}-\d{6}\.png$/i.test(f)) continue;
+      const p = path.join(SHOT_DIR, f);
+      try {
+        if (fs.statSync(p).mtimeMs < cut) { fs.unlinkSync(p); removed++; }
+      } catch {}
+    }
+    if (removed) ilog("cleaned " + removed + " screenshot(s) older than 7 days");
+  } catch {}
+}
+
 function spawnPsRetry(args, tries = 2) {
   try {
     const c = spawn("powershell.exe", args, { windowsHide: true, stdio: "ignore" });
@@ -641,6 +678,10 @@ app.whenReady().then(async () => {
   createTray();
   poll();
   setInterval(poll, POLL_MS);
+  setInterval(rotateLogIfHuge, 60000);
+  rotateLogIfHuge();
+  setInterval(cleanOldScreenshots, 12 * 60 * 60 * 1000);
+  cleanOldScreenshots();
   startMediaWatcher();
   // Ensure 24/7: register autostart on first run
   if (!(await regQuery())) await regAdd();

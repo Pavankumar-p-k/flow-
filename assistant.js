@@ -20,7 +20,16 @@ const STALL_MS = 60000;      // give up if NOTHING changes (no text, no tools) t
 // The default session model can point at a provider that is out of credits
 // (OpenRouter 402s killed every request once). Pin ours to a free model —
 // the same one this app's own session uses: MiMo-V2.6-Flash Free.
-const ASSIST_MODEL = { providerID: "opencode", id: "mimo-v2.6-flash-free" };
+// #13 — fallback chain: if the current model starts failing (402/404/quota),
+// the next entry is pinned automatically and the turn is retried once.
+const MODEL_CHAIN = [
+  { providerID: "opencode", id: "mimo-v2.6-flash-free" },
+  { providerID: "opencode", id: "deepseek-v4.1-flash-free" },
+  { providerID: "opencode", id: "hy4-flash-free" },
+];
+let modelIdx = 0;
+const ASSIST_MODEL = MODEL_CHAIN[modelIdx];
+const MODEL_ERR = /HTTP (402|403|404|429)|free usage|quota|credit|model.*not.*found|no.*models/i;
 
 const PROTOCOL = [
   "PROTOCOL — you are Notchy, a personal assistant the user messages from their phone over WhatsApp.",
@@ -128,12 +137,25 @@ async function ensureSession() {
 /* Force the free model — survives config defaults and provider credit runs. */
 async function pinModel() {
   if (!sessionID) return;
+  const m = MODEL_CHAIN[modelIdx];
   try {
-    await api("POST", "/api/session/" + sessionID + "/model", { model: ASSIST_MODEL });
-    log("model pinned to " + ASSIST_MODEL.providerID + "/" + ASSIST_MODEL.id);
+    await api("POST", "/api/session/" + sessionID + "/model", { model: m });
+    log("model pinned to " + m.providerID + "/" + m.id);
   } catch (e) {
     log("pin model failed: " + e.message.slice(0, 120));
   }
+}
+
+/* #13 — the current model looks unhealthy; step to the next one in the
+   chain and re-pin. Returns false when the chain is exhausted. */
+function advanceModel(reason) {
+  if (modelIdx >= MODEL_CHAIN.length - 1) {
+    log("model chain exhausted (" + reason + ")");
+    return false;
+  }
+  modelIdx++;
+  log("model fallback: " + reason + " -> " + MODEL_CHAIN[modelIdx].providerID + "/" + MODEL_CHAIN[modelIdx].id);
+  return true;
 }
 
 /* ---------- completion signalling (SSE) + polling fallback ---------- */
@@ -262,9 +284,24 @@ function activitySig(list, t0) {
 
 /* ---------- public API ---------- */
 
-async function ask(userText) {
+async function ask(userText, retried = false) {
   if (busy) return { reply: "Still working on your last request — send that again in a minute.", files: [], actions: [], busy: true };
   busy = true;
+  let res;
+  try {
+    res = await askOnce(userText, retried);
+  } finally {
+    busy = false;
+    waiter = null;
+  }
+  // #13 — model fallback: askOnce flagged a quota/model failure and we
+  // pinned the next free model; retry now that cleanup has run (a retry
+  // from inside askOnce would race its own finally).
+  if (res && res.__retry) return ask(userText, true);
+  return res;
+}
+
+async function askOnce(userText, retried) {
   try {
     const sid = await ensureSession();
     const t0 = Date.now();
@@ -349,7 +386,13 @@ async function ask(userText) {
         const idleMsg = list.find((m) => m.type === "idle" && (m.time?.created || 0) >= startedAt);
         if (idleMsg && idleMsg.outcome === "failed") {
           const err = idleMsg.error || {};
-          log("turn failed (post-loop): " + (err.type || "?") + " " + String(err.message || "").slice(0, 160));
+          const detail = (err.type || "?") + " " + String(err.message || "");
+          log("turn failed (post-loop): " + detail.slice(0, 160));
+          // #13 — quota/model failure → step to the next free model and retry.
+          if (MODEL_ERR.test(detail) && !retried && advanceModel(detail.slice(0, 80))) {
+            await pinModel();
+            return { __retry: true };
+          }
           return {
             reply: "⚠️ Assistant backend error (" + (err.type || "failed") + "): " +
               String(err.message || "unknown").slice(0, 300),
@@ -374,6 +417,11 @@ async function ask(userText) {
     return { reply, files, actions, cont, outcome };
   } catch (e) {
     log("ask error: " + e.message);
+    // #13 — the prompt itself was rejected (quota/model) → fall back too.
+    if (!retried && MODEL_ERR.test(e.message) && advanceModel(e.message.slice(0, 80))) {
+      await pinModel();
+      return { __retry: true };
+    }
     const offline = /service unavailable|ENOTFOUND|ECONNREFUSED|fetch failed/i.test(e.message);
     return {
       reply: offline
@@ -383,9 +431,6 @@ async function ask(userText) {
       actions: [],
       error: e.message,
     };
-  } finally {
-    busy = false;
-    waiter = null;
   }
 }
 

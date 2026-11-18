@@ -180,18 +180,54 @@ const taskQueue = [];
 let taskRunning = false;
 const QUEUE_MAX = 8;
 
+/* #10 — pending tasks survive a crash/restart: every routed message text is
+   written to queue-pending.json and removed when its task finishes; on boot
+   the leftovers are fed back through handleIncoming (at-least-once). */
+const PENDING_FILE = path.join(__dirname, "queue-pending.json");
+let pendingRaw = [];
+try { pendingRaw = JSON.parse(fs.readFileSync(PENDING_FILE, "utf8")) || []; } catch {}
+let curRaw = null;     // message text being routed right now (enqueue reads it)
+let restoring = false; // suppress "queued #" chatter while replaying
+let lastMsg = { text: "", at: 0 }; // #17 duplicate-tap guard
+
+/* #14 — assistant rate cap: this hour's turn timestamps (assistant.ask only;
+   commands/approvals bypass it). Keeps a runaway echo loop from burning the
+   free-model quota. */
+const ASSIST_RATE_MAX = 20;
+const ASSIST_RATE_WINDOW = 60 * 60 * 1000;
+const assistTurns = [];
+function assistRateHit() {
+  const now = Date.now();
+  while (assistTurns.length && now - assistTurns[0] > ASSIST_RATE_WINDOW) assistTurns.shift();
+  if (assistTurns.length >= ASSIST_RATE_MAX) return true;
+  assistTurns.push(now);
+  return false;
+}
+
+function savePending() {
+  try { fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingRaw)); } catch {}
+}
+
 function enqueue(label, fn) {
   if (taskQueue.length >= QUEUE_MAX) {
     try { wa.send("🗑 queue is full (8) — wait for the current tasks to finish, then resend."); } catch {}
     return;
   }
   const waiting = taskRunning || taskQueue.length > 0;
-  taskQueue.push({ label, fn });
-  if (waiting) {
+  taskQueue.push({ label, fn, raw: curRaw });
+  if (curRaw) { pendingRaw.push(curRaw); savePending(); }
+  if (waiting && !restoring) {
     log("queue +" + taskQueue.length + " " + label);
     try { wa.send("⏳ queued #" + taskQueue.length + ": " + label); } catch {}
   }
   drainQueue();
+}
+
+function finishTask(t) {
+  if (!t.raw) return;
+  const i = pendingRaw.indexOf(t.raw);
+  if (i >= 0) pendingRaw.splice(i, 1);
+  savePending();
 }
 
 async function drainQueue() {
@@ -206,6 +242,8 @@ async function drainQueue() {
       } catch (e) {
         log("task error [" + t.label + "]: " + e.message);
         try { await wa.send("⚠️ failed: " + t.label); } catch {}
+      } finally {
+        finishTask(t);
       }
     }
   } finally {
@@ -218,9 +256,28 @@ async function drainQueue() {
 async function handleIncoming(text) {
   if (!wa) return;
   const raw = text.trim();
+  curRaw = raw;
+  try {
+    return await routeIncoming(raw, text);
+  } finally {
+    curRaw = null;
+  }
+}
+
+async function routeIncoming(raw, text) {
   // Safety net: never parse our own outbound messages as commands, even if
   // an id mismatch lets an echo through the dedupe in whatsapp.js.
   if (/^(🔔|📊|📁|🤖|❓|✅|⚠️|❌|⏳|↩️|🗑|📸|🧠|🔧)/.test(raw)) return;
+
+  // #17 — pocket double-tap: the exact same text again within 10s is a
+  // duplicate, not a new request. Skip it silently (the first copy runs).
+  const now = Date.now();
+  if (raw === lastMsg.text && now - lastMsg.at < 10000) {
+    log("duplicate suppressed: " + raw.slice(0, 50));
+    return;
+  }
+  lastMsg = { text: raw, at: now };
+
   const low = raw.toLowerCase();
   const label = raw.slice(0, 44).replace(/\s+/g, " ");
   const st = () => (getState ? getState() : null);
@@ -321,6 +378,12 @@ function looksLikeRequest(s) {
 
 async function askAssistant(text, depth = 0) {
   if (!assistant) return wa.send(HELP);
+  // #14 — cap assistant turns per hour. Every turn (including <continue>
+  // follow-ups) is a real model call, so all of them count.
+  if (assistRateHit()) {
+    log("rate cap hit — request refused");
+    return wa.send("⏳ Assistant is rate-limited right now (20 requests/hour). Try again in a few minutes.");
+  }
   // Acknowledge immediately — the agent can take a minute on a real search.
   await wa.send(depth === 0 ? "🧠 on it…" : "🔧 working…");
   log("assistant request: " + text.slice(0, 120).replace(/\n/g, " ") + (depth ? " (cont " + depth + ")" : ""));
@@ -659,6 +722,37 @@ async function start(deps) {
   onEvent = deps.onEvent;
   if (running) return;
   running = true;
+
+  // #10 — replay messages that were queued when the app last died.
+  if (pendingRaw.length) {
+    const leftover = pendingRaw.slice();
+    log("restoring " + leftover.length + " pending task(s) from queue-pending.json");
+    pendingRaw = [];
+    savePending();
+    restoring = true; // suppress "queued #" chatter; enqueue re-adds each raw
+    try {
+      if (wa) await wa.send("🔁 recovered " + leftover.length + " task(s) that were queued before a restart.");
+      for (const raw of leftover) {
+        try { await handleIncoming(raw); } catch (e) { log("restore error: " + e.message); }
+      }
+    } finally {
+      restoring = false;
+    }
+  }
+
+  // #16 — pending approvals/forms: entries only shrink on reply events, so
+  // a missed event would keep them forever. Drop anything older than 24h.
+  setInterval(() => {
+    const cut = Date.now() - 24 * 60 * 60 * 1000;
+    for (const [id, p] of pending) {
+      if ((p.__when || 0) < cut) {
+        pending.delete(id);
+        log("pending expired #" + p.__seq);
+      }
+    }
+    pushPending();
+  }, 60 * 60 * 1000);
+
   (async () => {
     while (running) {
       try {

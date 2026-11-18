@@ -2,3 +2,4 @@ node_modules/
 wa-auth/
 debug.log
 wa-outbox.txt
+queue-pending.json
