@@ -5,16 +5,17 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { runPs } = require("./psrun");
 
 const SERVICE_FILE = path.join(os.homedir(), ".local", "state", "opencode", "service.json");
 const STATE_FILE = path.join(__dirname, "assistant.json");
 const DEBUG = path.join(__dirname, "debug.log");
 
-const TIMEOUT_MS = 240000;   // agent can take a while on big searches
+const TIMEOUT_MS = 480000;   // hard cap — computer-use turns can legitimately take minutes
 const MAX_FILES = 5;
 const MAX_FILE_BYTES = 200 * 1024 * 1024;
 const POLL_MS = 2000;
-const STALL_MS = 45000;      // give up early if the reply stopped growing
+const STALL_MS = 60000;      // give up if NOTHING changes (no text, no tools) this long
 
 // The default session model can point at a provider that is out of credits
 // (OpenRouter 402s killed every request once). Pin ours to a free model —
@@ -28,6 +29,7 @@ const PROTOCOL = [
   "Actually search the disk with Glob/Grep/Read. Home: C:\\Users\\peter.",
   "Screenshots: C:\\Users\\peter\\OneDrive\\Pictures\\Screenshots. Blender files usually sit in C:\\Users\\peter\\Documents.",
   "Reply BRIEFLY and plainly — it renders as one chat bubble. No markdown headers, no bullet walls.",
+  "SYSTEM AWARENESS — every message carries a LIVE SYSTEM SNAPSHOT: the foreground window, all open windows, and per-browser tab counts. Answer \"what's open\", \"which app is in front\", \"how many tabs\" directly from it — no tools needed. If it's absent, say you couldn't read the system state.",
   "",
   "FILES — if the user asked for files, end your reply with this block, up to 5 absolute paths that really exist and are under 200MB:",
   "<files>",
@@ -45,8 +47,15 @@ const PROTOCOL = [
   "- browser:URL  → open a URL in the default browser (must include https://). For \"search the web for X\" you may browse yourself and answer in text instead.",
   "- file:PATH  → open a file or folder with its default app.",
   "- focus:TITLE  → bring an existing window to the front (substring of its title), e.g. focus:Notepad or focus:Google Chrome.",
+  "- screenshot:screen | screenshot:window | screenshot:<title>  → capture a FRESH screenshot right now and send the PNG into the chat. Use for \"take a screenshot\", \"screenshot current window\", \"screenshot of chrome\". window = the app currently in front; <title> = that app's window.",
   "MUSIC RECIPE — to play a specific song: a YouTube /results SEARCH page never plays anything, so never emit one for a play request. Instead: (1) use browser tools to find a direct link — browser_navigate to https://www.youtube.com/results?search_query=<song>, then browser_read_links and take the FIRST /watch?v=VIDEO_ID link; (2) emit browser:https://www.youtube.com/watch?v=VIDEO_ID as your action. Chrome autoplays direct watch URLs immediately. One search, first link, done — keep it under ~20 seconds. For pause/next/prev while something is already playing, just emit the media: action.",
   "SPEED RULE — for app / browser / focus requests, emit the action block IMMEDIATELY and reply in one line. Do NOT run shell commands: shell here is slow and often access-denied. Browser tools are allowed ONLY for the music recipe above and for answering web questions.",
+  "NEVER launch a program by simulating keys or clicking the UI (no Win+R, no Start-menu clicking, no explorer tricks) — that is slow and fails. Launching = the app: action, always. Use open-computer-use tools only for WORKING INSIDE an already-open app.",
+  "CONTINUE — for tasks that need an app open first (\"open Paint and draw a circle\", \"open Chrome and go to…\"), do BOTH in one reply: (1) emit the launch action, (2) end the reply with this block telling your next turn what to do once the app is up:",
+  "<continue>",
+  "Now that Paint is open, use open-computer-use to draw a blue circle.",
+  "</continue>",
+  "The notch runs your action, waits a few seconds, then sends the continue text back to you as a new turn so you can finish the job with the computer-use tools. Omit the block when no follow-up work is needed.",
   "The notch executes actions instantly and reliably — prefer action blocks over shell for launching/opening things.",
   "After actions, say in one short line what you did (e.g. \"Opened Notepad ✅\").",
 ].join("\n");
@@ -201,13 +210,24 @@ function extractActions(text) {
     clean = text.replace(block[0], "");
     for (const line of block[1].split(/\r?\n/)) {
       const s = line.trim().replace(/^[-*•]\s*/, "");
-      const m = s.match(/^(app|media|browser|file|focus)\s*:\s*(.+)$/i);
+      const m = s.match(/^(app|media|browser|file|focus|screenshot)\s*:\s*(.+)$/i);
       if (!m) continue;
       const value = m[2].trim().replace(/^["'`]|["'`]$/g, "");
       if (value) actions.push({ type: m[1].toLowerCase(), value });
     }
   }
   return { reply: clean.replace(/\n{3,}/g, "\n\n").trim(), actions };
+}
+
+/* Multi-step requests: the model launches the app in this turn and leaves a
+   follow-up instruction the bridge feeds back once the app is open. */
+function extractContinue(text) {
+  const block = text.match(/<continue>\s*([\s\S]*?)\s*<\/continue>/i);
+  if (!block) return { reply: text, cont: null };
+  return {
+    reply: text.replace(block[0], "").replace(/\n{3,}/g, "\n\n").trim(),
+    cont: block[1].trim(),
+  };
 }
 
 function collectReply(list, t0) {
@@ -223,6 +243,23 @@ function collectReply(list, t0) {
   return text;
 }
 
+/* Signature of everything that happened after our prompt — message count plus
+   per-message content sizes. Any tool call or streamed token changes it, so a
+   busy tool-only turn never looks idle to the stall detector. */
+function activitySig(list, t0) {
+  const parts = [];
+  for (const m of list) {
+    if ((m.time?.created || 0) < t0) continue;
+    let sz = 0;
+    for (const c of m.content || []) {
+      sz += c.type === "text" ? (c.text || "").length : 1;
+      if (c.type === "tool") sz += (c.state && c.state.status ? c.state.status.length : 0);
+    }
+    parts.push(m.type + ":" + sz);
+  }
+  return parts.join("|");
+}
+
 /* ---------- public API ---------- */
 
 async function ask(userText) {
@@ -235,14 +272,27 @@ async function ask(userText) {
 
     // Register the waiter before prompting so a fast completion isn't missed.
     const completion = waitFor(sid, null, TIMEOUT_MS);
-    const res = await api("POST", "/api/session/" + sid + "/prompt", {
-      text: PROTOCOL + "\n\nUSER: " + userText,
-    });
+
+    // Live system snapshot (foreground window, open windows, browser tab
+    // counts) so the model can answer awareness questions without tools.
+    let snap = "";
+    try {
+      snap = await runPs(path.join(__dirname, "scripts", "system-info.ps1"), [],
+        { timeoutMs: 12000 });
+    } catch (e) { log("system snapshot failed: " + e.message); }
+    const prompt = PROTOCOL
+      + (snap ? "\n\nLIVE SYSTEM SNAPSHOT (right now):\n" + snap : "")
+      + "\n\nUSER: " + userText;
+
+    const res = await api("POST", "/api/session/" + sid + "/prompt", { text: prompt });
     const startedAt = (res.data && res.data.time && res.data.time.created) || t0;
 
     // Poll for an idle marker after our prompt; SSE notify short-circuits it.
+    // Progress = ANY change in the thread (text, tool calls, reasoning) — a
+    // tool-only turn must not look "stalled" just because no text appeared yet.
     const deadline = Date.now() + TIMEOUT_MS;
     let lastText = "";
+    let lastSig = "";
     let lastChange = Date.now();
     let outcome = "timeout";
 
@@ -256,7 +306,10 @@ async function ask(userText) {
       try { list = await fetchMessages(sid); } catch (e) { log("fetch failed: " + e.message.slice(0, 80)); }
 
       const text = collectReply(list, startedAt);
-      if (text && text !== lastText) { lastText = text; lastChange = Date.now(); }
+      if (text) lastText = text;
+
+      const sig = activitySig(list, startedAt);
+      if (sig !== lastSig) { lastSig = sig; lastChange = Date.now(); }
 
       const idleMsg = list.find((m) => m.type === "idle" && (m.time?.created || 0) >= startedAt);
       if (idleMsg) {
@@ -278,11 +331,13 @@ async function ask(userText) {
         if (raced.kind === "failed") { outcome = "failed"; break; }
         if (raced.kind === "idle") { outcome = "idle"; break; }
       }
-      // Reply exists but nothing new for a while → treat as finished.
-      if (lastText && Date.now() - lastChange > STALL_MS) { outcome = "stalled"; break; }
+      // Nothing at all changed for a long while → the turn is truly stuck.
+      if (Date.now() - lastChange > STALL_MS) { outcome = lastText ? "stalled" : "stuck"; break; }
     }
 
-    if (outcome === "timeout" && !lastText) {
+    if ((outcome === "timeout" || outcome === "stuck") && !lastText) {
+      // Stop the runaway turn so the session is free for the next request.
+      try { await api("POST", "/api/session/" + sid + "/interrupt"); log("interrupted stuck turn"); } catch {}
       return { reply: "⏰ That took too long and produced no reply. Try a narrower request.", files: [], actions: [], error: "timeout" };
     }
 
@@ -307,14 +362,16 @@ async function ask(userText) {
     const finalText = lastText || "";
     // Actions first: their file: lines must not be mistaken for <files> paths.
     const acted = extractActions(finalText);
-    const { reply, files } = extractFiles(acted.reply);
+    const contd = extractContinue(acted.reply);
+    const { reply, files } = extractFiles(contd.reply);
     const actions = acted.actions;
-    log("done outcome=" + outcome + " chars=" + finalText.length + " files=" + files.length + " actions=" + actions.length);
+    const cont = contd.cont;
+    log("done outcome=" + outcome + " chars=" + finalText.length + " files=" + files.length + " actions=" + actions.length + " cont=" + (cont ? 1 : 0));
 
-    if (!reply && !files.length && !actions.length) {
+    if (!reply && !files.length && !actions.length && !cont) {
       return { reply: "🤔 The assistant finished but said nothing. Try rewording.", files: [], actions: [] };
     }
-    return { reply, files, actions, outcome };
+    return { reply, files, actions, cont, outcome };
   } catch (e) {
     log("ask error: " + e.message);
     const offline = /service unavailable|ENOTFOUND|ECONNREFUSED|fetch failed/i.test(e.message);

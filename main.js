@@ -320,6 +320,10 @@ let hoverTimer = null;
 function applyMouseIgnore(ignore) {
   if (!win || win.isDestroyed() || ignore === mouseIgnored) return;
   mouseIgnored = ignore;
+  try {
+    fs.appendFileSync(path.join(APP_DIR, "debug.log"),
+      new Date().toISOString() + " MOUSE ignore=" + ignore + "\n");
+  } catch {}
   win.setIgnoreMouseEvents(ignore, { forward: true });
 }
 

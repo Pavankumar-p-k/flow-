@@ -11,6 +11,7 @@ const os = require("os");
 const { spawn } = require("child_process");
 const repos = require("./repos");
 const assistant = require("./assistant");
+const { runPs } = require("./psrun");
 
 const SERVICE_FILE = path.join(os.homedir(), ".local", "state", "opencode", "service.json");
 const DEBUG = path.join(__dirname, "debug.log");
@@ -163,6 +164,9 @@ const HELP = [
   "\"open notepad\" · \"play music\" · \"next song\"",
   "\"open github.com\" · \"send me my latest screenshot\"",
   "",
+  "screenshots:  /screenshot  ·  /screenshot window  ·  /screenshot <app title>",
+  "system:  \"how many tabs are open\" · \"what app is in front\"",
+  "",
   "to answer a prompt:  allow / always / reject",
   "or numbered:  2 allow · 1 reject · 1: your answer",
 ].join("\n");
@@ -257,6 +261,21 @@ async function handleIncoming(text) {
     // no matching prompt — fall through to the normal command/assistant path
   }
 
+  // /screenshot [window|screen|<app title>] — fresh capture sent to the chat.
+  // Only the direct form takes this fast path; longer natural phrasing falls
+  // through to the assistant (which can emit its own screenshot: action).
+  m = raw.match(/^\/\s*(?:screenshot|screen[\s-]?shot)\b\s*(.*)$/i)
+    || raw.match(/^(?:screenshot|screen[\s-]?shot)\b\s*(.*)$/i);
+  if (m) {
+    const arg = m[1].trim();
+    const simple = !arg || /^(window|current window|screen|full|desktop|entire screen)$/i.test(arg)
+      || (arg.length <= 30 && !/\b(of|my|the|send|and|with|for)\b/i.test(arg));
+    const slashed = /^\/\s*(?:screenshot|screen[\s-]?shot)/i.test(raw);
+    if (slashed || simple) {
+      return enqueue("screenshot", () => takeScreenshot(arg));
+    }
+  }
+
   switch (low) {
     case "help":
     case "commands":
@@ -300,22 +319,34 @@ function looksLikeRequest(s) {
     || s.length > 120;
 }
 
-async function askAssistant(text) {
+async function askAssistant(text, depth = 0) {
   if (!assistant) return wa.send(HELP);
   // Acknowledge immediately — the agent can take a minute on a real search.
-  await wa.send("🧠 on it…");
-  log("assistant request: " + text.slice(0, 120).replace(/\n/g, " "));
+  await wa.send(depth === 0 ? "🧠 on it…" : "🔧 working…");
+  log("assistant request: " + text.slice(0, 120).replace(/\n/g, " ") + (depth ? " (cont " + depth + ")" : ""));
   const res = await assistant.ask(text);
   for (const chunk of chunkReply(res.reply || "")) await wa.send(chunk);
   const actions = res.actions || [];
   if (!res.reply && actions.length) await wa.send("✅ done");
   for (const a of actions) {
+    if (String(a.type).toLowerCase() === "screenshot") {
+      // Screenshot is async: capture, then push the PNG into the chat.
+      await takeScreenshot(a.value);
+      continue;
+    }
     const ok = runAction(a);
     log("action " + a.type + ":" + a.value + " -> " + ok);
     if (!ok) await wa.send("⚠️ couldn't do that: " + a.type + ":" + a.value);
   }
   for (const f of res.files || []) {
     await wa.sendFile(f.path, path.basename(f.path));
+  }
+  // Multi-step: the assistant launched an app and left follow-up work.
+  // Give the app a moment to open, then hand the instruction back as turn 2.
+  if (res.cont && depth < 2) {
+    log("continue -> " + res.cont.slice(0, 100).replace(/\n/g, " "));
+    await new Promise((r) => setTimeout(r, 3500));
+    return askAssistant(res.cont, depth + 1);
   }
 }
 
@@ -335,6 +366,25 @@ function spawnRetry(cmd, args, opts, tries = 2) {
     log("spawn throw " + cmd + ": " + e.message);
     return null;
   }
+}
+
+/* Fresh screenshot on demand: runs screenshot.ps1, then pushes the PNG into
+   the chat. value: "" | "screen" | "window" | <app title> */
+async function takeScreenshot(value) {
+  const v = String(value || "").trim();
+  const target = /^window$|^current window$/i.test(v) ? "window" : /^screen$|^full$|^desktop$/i.test(v) || !v ? "screen" : "window";
+  const title = target === "window" && v && !/^window$|^current window$/i.test(v) ? v : "";
+  const args = target === "window" ? ["-Target", "window"] : ["-Target", "screen"];
+  if (title) args.push("-Title", title);
+  log("screenshot target=" + target + (title ? " title=" + title : ""));
+  await wa.send("📸 capturing " + (title || target) + "…");
+  const out = await runPs(path.join(__dirname, "scripts", "screenshot.ps1"), args, { timeoutMs: 20000, tries: 3 });
+  const file = (out.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).pop()) || "";
+  if (!file || !fs.existsSync(file)) {
+    return wa.send("⚠️ screenshot failed — no image produced.");
+  }
+  await wa.sendFile(file, path.basename(file));
+  log("screenshot sent: " + file);
 }
 
 function runAction(a) {
@@ -366,6 +416,12 @@ function runAction(a) {
       // "start" resolves PATH, App Paths (chrome, msedge…) and .lnk names.
       const parts = v.split(/\s+/);
       spawnRetry("cmd.exe", ["/c", "start", "", ...parts], detached);
+      // Bring the new window to the front once it has had time to open.
+      const appName = parts[0];
+      setTimeout(() => {
+        spawnRetry("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+          path.join(__dirname, "scripts", "focus-window.ps1"), appName], detached);
+      }, 1500);
       return true;
     } else if (type === "focus") {
       spawnRetry("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File",

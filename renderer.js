@@ -246,6 +246,7 @@ function setPage(p) {
 document.querySelectorAll(".pg-tab, .pg-dot").forEach((el) => {
   el.addEventListener("click", (e) => {
     e.stopPropagation();
+    console.log("CLICK pg-tab " + el.dataset.page);
     setPage(el.dataset.page);
   });
 });
@@ -277,6 +278,7 @@ function restoreSub(p) {
 document.querySelectorAll(".sub-tabs").forEach((row) => {
   row.addEventListener("click", (e) => {
     const btn = e.target.closest(".sub-tab");
+    console.log("CLICK sub-tabs row=" + row.parentElement.id + " target=" + (e.target.className || e.target.tagName) + " btn=" + (btn ? btn.dataset.sub : "none"));
     if (!btn) return;
     e.stopPropagation();
     setSub(row.parentElement, btn.dataset.sub);
