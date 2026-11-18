@@ -23,6 +23,9 @@ public class ShotWin {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool f);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
   public struct RECT { public int Left, Top, Right, Bottom; }
   public static IntPtr FindByTitle(string sub) {
     IntPtr found = IntPtr.Zero;
@@ -35,6 +38,23 @@ public class ShotWin {
       return true;
     }, IntPtr.Zero);
     return found;
+  }
+  // Foreground-lock-proof activation: a plain SetForegroundWindow from a
+  // background process is silently denied by Windows. Attach our input queue
+  // to the current foreground thread + tap ALT to unlock, then raise the window.
+  public static bool Activate(IntPtr h) {
+    ShowWindow(h, 9); // SW_RESTORE (undoes minimize)
+    IntPtr fg = GetForegroundWindow();
+    uint fgTid;
+    GetWindowThreadProcessId(fg, out fgTid);
+    uint myTid = GetCurrentThreadId();
+    bool att = false;
+    if (fgTid != 0 && fgTid != myTid) att = AttachThreadInput(myTid, fgTid, true);
+    keybd_event(0x12, 0, 0, UIntPtr.Zero); // ALT down
+    keybd_event(0x12, 0, 2, UIntPtr.Zero); // ALT up
+    bool ok = SetForegroundWindow(h);
+    if (att) AttachThreadInput(myTid, fgTid, false);
+    return ok;
   }
 }
 "@
@@ -54,9 +74,14 @@ if ($Target -eq "window") {
   if ($Title) { $hwnd = [ShotWin]::FindByTitle($Title) }
   if ($hwnd -eq [IntPtr]::Zero) { $hwnd = [ShotWin]::GetForegroundWindow() }
   if ($hwnd -ne [IntPtr]::Zero) {
-    [void][ShotWin]::ShowWindow($hwnd, 9)        # SW_RESTORE (undoes minimize)
-    [void][ShotWin]::SetForegroundWindow($hwnd)
-    Start-Sleep -Milliseconds 450                # let it come forward & paint
+    # Focus the app being shot — foreground-lock-proof, verify it actually
+    # took focus before copying pixels (plain SetForegroundWindow is denied).
+    for ($i = 0; $i -lt 6; $i++) {
+      [void][ShotWin]::Activate($hwnd)
+      Start-Sleep -Milliseconds 250
+      if ([ShotWin]::GetForegroundWindow() -eq $hwnd) { break }
+    }
+    Start-Sleep -Milliseconds 350                # let it paint after focus
     $r = New-Object ShotWin+RECT
     if ([ShotWin]::GetWindowRect($hwnd, [ref]$r)) { $rect = $r }
   }
