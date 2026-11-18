@@ -220,7 +220,7 @@ async function handleIncoming(text) {
   const raw = text.trim();
   // Safety net: never parse our own outbound messages as commands, even if
   // an id mismatch lets an echo through the dedupe in whatsapp.js.
-  if (/^(🔔|📊|📁|🤖|❓|✅|⚠️|❌|⏳|↩️|🗑)/.test(raw)) return;
+  if (/^(🔔|📊|📁|🤖|❓|✅|⚠️|❌|⏳|↩️|🗑|📸|🧠|🔧)/.test(raw)) return;
   const low = raw.toLowerCase();
   const label = raw.slice(0, 44).replace(/\s+/g, " ");
   const st = () => (getState ? getState() : null);
