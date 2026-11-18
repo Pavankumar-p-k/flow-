@@ -69,7 +69,7 @@ function render() {
   if (sessions.length === 0) {
     list.innerHTML = '<div class="empty">' + (state.online ? "No sessions yet" : "Cannot reach OpenCode") + "</div>";
   } else {
-    const top = sessions.slice(0, 8);
+    const top = sessions.slice(0, 12);   // own panel now → room for more
     const maxTok = Math.max(1, ...top.map(sessTokens));
     list.innerHTML = top.map((s) => {
       const busy = !!state.active[s.id];
@@ -238,6 +238,7 @@ function setPage(p) {
   document.querySelectorAll(".pg-tab").forEach((b) => b.classList.toggle("active", b.dataset.page === p));
   document.querySelectorAll(".pg-dot").forEach((d) => d.classList.toggle("active", d.dataset.page === p));
   PAGES.forEach((k) => $("page-" + k).classList.toggle("active", k === p));
+  restoreSub(p);
   if (p === "chat") refreshWaPage();
   reportRects();
 }
@@ -246,6 +247,39 @@ document.querySelectorAll(".pg-tab, .pg-dot").forEach((el) => {
   el.addEventListener("click", (e) => {
     e.stopPropagation();
     setPage(el.dataset.page);
+  });
+});
+
+/* ---------- sub panels (focused views inside a page) ---------- */
+
+// The main process hides the notch with CSS (never win.hide() — that breaks
+// transparent-window painting on Windows) while the intro overlay runs.
+window.notch.onIntroVisible((v) => { $("notch").classList.toggle("intro-hidden", !v); });
+
+function setSub(pageEl, subId) {
+  if (!pageEl || !subId) return;
+  const subs = [...pageEl.querySelectorAll(".sub")];
+  if (!subs.some((s) => s.id === subId)) return;
+  pageEl.querySelectorAll(".sub-tab").forEach((b) => b.classList.toggle("active", b.dataset.sub === subId));
+  subs.forEach((s) => s.classList.toggle("active", s.id === subId));
+  try { localStorage.setItem("sub-" + pageEl.id, subId); } catch {}
+}
+
+function restoreSub(p) {
+  const pageEl = $("page-" + p);
+  if (!pageEl) return;
+  try {
+    const saved = localStorage.getItem("sub-" + pageEl.id);
+    if (saved) setSub(pageEl, saved);
+  } catch {}
+}
+
+document.querySelectorAll(".sub-tabs").forEach((row) => {
+  row.addEventListener("click", (e) => {
+    const btn = e.target.closest(".sub-tab");
+    if (!btn) return;
+    e.stopPropagation();
+    setSub(row.parentElement, btn.dataset.sub);
   });
 });
 
@@ -297,6 +331,16 @@ document.addEventListener("keydown", (e) => {
   const i = PAGES.indexOf(page);
   if (e.key === "ArrowLeft") setPage(PAGES[(i + PAGES.length - 1) % PAGES.length]);
   if (e.key === "ArrowRight") setPage(PAGES[(i + 1) % PAGES.length]);
+  // up / down steps through the sub panels of the current page
+  if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+    const pageEl = $("page-" + page);
+    const subs = [...pageEl.querySelectorAll(".sub")];
+    if (subs.length > 1) {
+      const cur = subs.findIndex((s) => s.classList.contains("active"));
+      const n = ((cur < 0 ? 0 : cur) + (e.key === "ArrowDown" ? 1 : subs.length - 1)) % subs.length;
+      setSub(pageEl, subs[n].id);
+    }
+  }
 });
 
 // prevent drag-selection quirks on the pill
@@ -304,6 +348,7 @@ $("pill").addEventListener("click", (e) => { e.preventDefault(); window.notch.mo
 
 applyLayout();
 setPage(page);
+restoreSub(page);
 render();
 renderMedia();
 

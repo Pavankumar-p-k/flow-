@@ -29,4 +29,5 @@ contextBridge.exposeInMainWorld("notch", {
   introStart: () => ipcRenderer.send("intro:start"),
   introSkip: () => ipcRenderer.send("intro:skip-req"),
   onIntroSkip: (cb) => ipcRenderer.on("intro:skip", () => cb()),
+  onIntroVisible: (cb) => ipcRenderer.on("intro-visible", (_e, v) => cb(v)),
 });

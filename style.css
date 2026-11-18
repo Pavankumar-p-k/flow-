@@ -259,6 +259,50 @@ html, body {
 }
 .pg-dot.active { background: var(--ink); transform: scale(1.15); }
 
+/* ---------- sub panels (focused views inside a page) ---------- */
+
+/* hidden (CSS only — never win.hide()) while the intro overlay runs */
+#notch.intro-hidden { visibility: hidden; }
+
+.sub-tabs {
+  display: flex;
+  gap: 4px;
+  flex: none;
+  align-self: flex-start;
+  padding: 2px;
+  background: rgba(255, 255, 255, .05);
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 999px;
+}
+.sub-tab {
+  height: 20px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-4);
+  font: 600 10px/1 var(--font);
+  letter-spacing: .04em;
+  cursor: pointer;
+  transition: background .18s var(--ease), color .18s, transform .12s;
+}
+.sub-tab:hover { color: var(--ink); }
+.sub-tab:active { transform: scale(.96); }
+.sub-tab.active { background: rgba(255, 255, 255, .14); color: var(--ink); }
+
+.sub {
+  display: none;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.sub.active {
+  display: flex;
+  animation: page-in .28s cubic-bezier(.2, .9, .25, 1);
+}
+
 /* ---------- cards (colored widgets) ---------- */
 
 .card {

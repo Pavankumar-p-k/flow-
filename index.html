@@ -46,48 +46,58 @@
           <button class="pg-tab" data-page="chat">WhatsApp</button>
         </div>
 
-        <!-- page 1 : dashboard -->
+        <!-- page 1 : dashboard — minimal sub panels -->
         <div id="page-sessions" class="page active">
-          <div class="kpis">
-            <div class="kpi k-blue">
-              <span class="kpi-lbl">active</span>
-              <span class="kpi-val" id="kpi-active">0</span>
-              <span class="kpi-sub" id="kpi-sub">0 sessions</span>
-            </div>
-            <div class="kpi k-violet">
-              <span class="kpi-lbl">tokens · 24h</span>
-              <span class="kpi-val" id="kpi-tokens">0</span>
-              <span class="kpi-sub" id="kpi-tok-sub">in 0 · out 0</span>
-            </div>
-            <div class="kpi k-green">
-              <span class="kpi-lbl">tool success</span>
-              <span class="kpi-val" id="kpi-tools">—</span>
-              <span class="kpi-sub" id="kpi-tools-sub">0 calls</span>
-            </div>
+          <div class="sub-tabs">
+            <button class="sub-tab active" data-sub="s-overview">Overview</button>
+            <button class="sub-tab" data-sub="s-agents">Agents</button>
+            <button class="sub-tab" data-sub="s-activity">Activity</button>
           </div>
 
-          <div class="card" id="usage-card">
-            <div class="card-head">
-              <span class="card-title">Token mix</span>
-              <span class="card-meta">24h</span>
+          <!-- sub 1 : at a glance -->
+          <div id="s-overview" class="sub active">
+            <div class="kpis">
+              <div class="kpi k-blue">
+                <span class="kpi-lbl">active</span>
+                <span class="kpi-val" id="kpi-active">0</span>
+                <span class="kpi-sub" id="kpi-sub">0 sessions</span>
+              </div>
+              <div class="kpi k-violet">
+                <span class="kpi-lbl">tokens · 24h</span>
+                <span class="kpi-val" id="kpi-tokens">0</span>
+                <span class="kpi-sub" id="kpi-tok-sub">in 0 · out 0</span>
+              </div>
+              <div class="kpi k-green">
+                <span class="kpi-lbl">tool success</span>
+                <span class="kpi-val" id="kpi-tools">—</span>
+                <span class="kpi-sub" id="kpi-tools-sub">0 calls</span>
+              </div>
             </div>
-            <div id="usage-wrap">
-              <div id="donut">
-                <div id="donut-hole">
-                  <span id="donut-total">0</span>
-                  <span id="donut-lbl">TOTAL</span>
+
+            <div class="card" id="usage-card">
+              <div class="card-head">
+                <span class="card-title">Token mix</span>
+                <span class="card-meta">24h</span>
+              </div>
+              <div id="usage-wrap">
+                <div id="donut">
+                  <div id="donut-hole">
+                    <span id="donut-total">0</span>
+                    <span id="donut-lbl">TOTAL</span>
+                  </div>
+                </div>
+                <div id="usage-legend">
+                  <div class="leg"><i style="background:#26A5E4"></i><span class="leg-name">input</span><span class="leg-val" id="u-in">0</span></div>
+                  <div class="leg"><i style="background:#3DD68C"></i><span class="leg-name">output</span><span class="leg-val" id="u-out">0</span></div>
+                  <div class="leg"><i style="background:#B892FF"></i><span class="leg-name">reasoning</span><span class="leg-val" id="u-reason">0</span></div>
+                  <div class="leg"><i style="background:#E39A4C"></i><span class="leg-name">cache read</span><span class="leg-val" id="u-cache">0</span></div>
                 </div>
               </div>
-              <div id="usage-legend">
-                <div class="leg"><i style="background:#26A5E4"></i><span class="leg-name">input</span><span class="leg-val" id="u-in">0</span></div>
-                <div class="leg"><i style="background:#3DD68C"></i><span class="leg-name">output</span><span class="leg-val" id="u-out">0</span></div>
-                <div class="leg"><i style="background:#B892FF"></i><span class="leg-name">reasoning</span><span class="leg-val" id="u-reason">0</span></div>
-                <div class="leg"><i style="background:#E39A4C"></i><span class="leg-name">cache read</span><span class="leg-val" id="u-cache">0</span></div>
-              </div>
             </div>
           </div>
 
-          <div class="grid">
+          <!-- sub 2 : sessions -->
+          <div id="s-agents" class="sub">
             <div class="card" id="agents-card">
               <div class="card-head">
                 <span class="card-title">Agents</span>
@@ -95,7 +105,10 @@
               </div>
               <div id="agent-list"><div class="empty">No sessions</div></div>
             </div>
+          </div>
 
+          <!-- sub 3 : activity -->
+          <div id="s-activity" class="sub">
             <div class="card" id="activity-card">
               <div class="card-head">
                 <span class="card-title">Activity</span>
@@ -131,44 +144,56 @@
           <div id="media-cap" class="nt-cap">windows media keys · prev / play / next</div>
         </div>
 
-        <!-- page 3 : whatsapp bridge -->
+        <!-- page 3 : whatsapp bridge — sub panels -->
         <div id="page-chat" class="page">
-          <div class="card" id="wa-card">
-            <div class="card-head">
-              <span class="card-title">WhatsApp link</span>
-              <span class="card-meta" id="wa-state">idle</span>
-            </div>
-            <div id="wa-body">
-              <div id="wa-qr-wrap">
-                <img id="wa-qr" alt="QR code" />
-                <div id="wa-qr-hint">Scan with WhatsApp → Linked devices</div>
+          <div class="sub-tabs">
+            <button class="sub-tab active" data-sub="w-link">Link</button>
+            <button class="sub-tab" data-sub="w-prompts">Prompts</button>
+            <button class="sub-tab" data-sub="w-repos">Repos</button>
+          </div>
+
+          <div id="w-link" class="sub active">
+            <div class="card" id="wa-card">
+              <div class="card-head">
+                <span class="card-title">WhatsApp link</span>
+                <span class="card-meta" id="wa-state">idle</span>
               </div>
-              <div id="wa-connected">
-                <div id="wa-jid">—</div>
-                <div id="wa-hint">Messages go to your own chat. Reply with:<br/><code>allow</code> · <code>always</code> · <code>reject</code> · <code>status</code> · <code>repos</code></div>
+              <div id="wa-body">
+                <div id="wa-qr-wrap">
+                  <img id="wa-qr" alt="QR code" />
+                  <div id="wa-qr-hint">Scan with WhatsApp → Linked devices</div>
+                </div>
+                <div id="wa-connected">
+                  <div id="wa-jid">—</div>
+                  <div id="wa-hint">Messages go to your own chat. Reply with:<br/><code>allow</code> · <code>always</code> · <code>reject</code> · <code>status</code> · <code>repos</code></div>
+                </div>
+                <div id="wa-error"></div>
               </div>
-              <div id="wa-error"></div>
-            </div>
-            <div id="wa-actions">
-              <button id="wa-btn" class="pill-btn">Link WhatsApp</button>
-              <button id="wa-btn-unlink" class="pill-btn ghost">Unlink</button>
+              <div id="wa-actions">
+                <button id="wa-btn" class="pill-btn">Link WhatsApp</button>
+                <button id="wa-btn-unlink" class="pill-btn ghost">Unlink</button>
+              </div>
             </div>
           </div>
 
-          <div class="card" id="wa-pending-card">
-            <div class="card-head">
-              <span class="card-title">Pending prompts</span>
-              <span class="card-meta" id="wa-pending-count">0</span>
+          <div id="w-prompts" class="sub">
+            <div class="card" id="wa-pending-card">
+              <div class="card-head">
+                <span class="card-title">Pending prompts</span>
+                <span class="card-meta" id="wa-pending-count">0</span>
+              </div>
+              <div id="wa-pending"><div class="empty">No prompts waiting</div></div>
             </div>
-            <div id="wa-pending"><div class="empty">No prompts waiting</div></div>
           </div>
 
-          <div class="card" id="repos-card">
-            <div class="card-head">
-              <span class="card-title">Git repos</span>
-              <span class="card-meta" id="repos-count">—</span>
+          <div id="w-repos" class="sub">
+            <div class="card" id="repos-card">
+              <div class="card-head">
+                <span class="card-title">Git repos</span>
+                <span class="card-meta" id="repos-count">—</span>
+              </div>
+              <div id="repos-list"><div class="empty">scanning…</div></div>
             </div>
-            <div id="repos-list"><div class="empty">scanning…</div></div>
           </div>
         </div>
 

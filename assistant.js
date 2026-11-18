@@ -16,6 +16,11 @@ const MAX_FILE_BYTES = 200 * 1024 * 1024;
 const POLL_MS = 2000;
 const STALL_MS = 45000;      // give up early if the reply stopped growing
 
+// The default session model can point at a provider that is out of credits
+// (OpenRouter 402s killed every request once). Pin ours to a free model —
+// the same one this app's own session uses: MiMo-V2.6-Flash Free.
+const ASSIST_MODEL = { providerID: "opencode", id: "mimo-v2.6-flash-free" };
+
 const PROTOCOL = [
   "PROTOCOL — you are Notchy, a personal assistant the user messages from their phone over WhatsApp.",
   "They send short free-form lines. Help them find and retrieve files on this Windows PC,",
@@ -96,6 +101,7 @@ async function ensureSession() {
   if (sessionID) {
     try {
       await api("GET", "/api/session/" + sessionID); // throws 404 if deleted
+      await pinModel();
       return sessionID;
     } catch (e) {
       log("session " + sessionID + " gone (" + e.message.slice(0, 60) + ") — recreating");
@@ -106,7 +112,19 @@ async function ensureSession() {
   sessionID = res.data.id;
   persist();
   log("created session " + sessionID);
+  await pinModel();
   return sessionID;
+}
+
+/* Force the free model — survives config defaults and provider credit runs. */
+async function pinModel() {
+  if (!sessionID) return;
+  try {
+    await api("POST", "/api/session/" + sessionID + "/model", { model: ASSIST_MODEL });
+    log("model pinned to " + ASSIST_MODEL.providerID + "/" + ASSIST_MODEL.id);
+  } catch (e) {
+    log("pin model failed: " + e.message.slice(0, 120));
+  }
 }
 
 /* ---------- completion signalling (SSE) + polling fallback ---------- */
@@ -240,8 +258,21 @@ async function ask(userText) {
       const text = collectReply(list, startedAt);
       if (text && text !== lastText) { lastText = text; lastChange = Date.now(); }
 
-      const idle = list.some((m) => m.type === "idle" && (m.time?.created || 0) >= startedAt);
-      if (idle) { outcome = "idle"; break; }
+      const idleMsg = list.find((m) => m.type === "idle" && (m.time?.created || 0) >= startedAt);
+      if (idleMsg) {
+        // A failed turn (quota, provider error) arrives as an idle marker too —
+        // never report it as "finished but said nothing".
+        if (idleMsg.outcome === "failed") {
+          const err = idleMsg.error || {};
+          log("turn failed: " + (err.type || "?") + " " + String(err.message || "").slice(0, 160));
+          return {
+            reply: "⚠️ Assistant backend error (" + (err.type || "failed") + "): " +
+              String(err.message || "unknown").slice(0, 300),
+            files: [], actions: [], error: err.type || "failed",
+          };
+        }
+        outcome = "idle"; break;
+      }
 
       if (raced.done) {
         if (raced.kind === "failed") { outcome = "failed"; break; }
@@ -253,6 +284,24 @@ async function ask(userText) {
 
     if (outcome === "timeout" && !lastText) {
       return { reply: "⏰ That took too long and produced no reply. Try a narrower request.", files: [], actions: [], error: "timeout" };
+    }
+
+    // No reply at all → re-check why before blaming the wording (quota and
+    // provider failures land here when the SSE path beat the poll).
+    if (!lastText) {
+      try {
+        const list = await fetchMessages(sid);
+        const idleMsg = list.find((m) => m.type === "idle" && (m.time?.created || 0) >= startedAt);
+        if (idleMsg && idleMsg.outcome === "failed") {
+          const err = idleMsg.error || {};
+          log("turn failed (post-loop): " + (err.type || "?") + " " + String(err.message || "").slice(0, 160));
+          return {
+            reply: "⚠️ Assistant backend error (" + (err.type || "failed") + "): " +
+              String(err.message || "unknown").slice(0, 300),
+            files: [], actions: [], error: err.type || "failed",
+          };
+        }
+      } catch {}
     }
 
     const finalText = lastText || "";

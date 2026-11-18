@@ -414,7 +414,10 @@ function startIntro() {
       ilog("INTRO skipped: clip file missing");
       return false;
     }
-    const nb = (win && !win.isDestroyed()) ? win.getBounds() : boundsFor(false);
+    // Notch bottom edge for the burst origin — always the COLLAPSED geometry
+    // at top centre, never the current bounds (the panel may be expanded
+    // when the intro starts, which would put the origin mid-screen).
+    const nb = boundsFor(false);
     const display = screen.getDisplayMatching(nb) || screen.getPrimaryDisplay();
     const db = display.bounds;
     introOriginY = Math.round(nb.y + nb.height - db.y);              // notch bottom edge
@@ -458,7 +461,10 @@ function startIntro() {
     });
 
     // The shrinking circle lands on the notch, so hide the real one first.
-    if (win && !win.isDestroyed()) { collapse(); win.hide(); }
+    // NOTE: never win.hide() here — hide→show on a transparent window breaks
+    // frame presentation on Windows (window stays alive but paints nothing).
+    // Hide it in the renderer instead; the intro covers us anyway.
+    if (win && !win.isDestroyed()) { collapse(); win.webContents.send("intro-visible", false); }
 
     introWin.loadFile(path.join(__dirname, "intro", "intro.html"));
     introWin.once("ready-to-show", () => {
@@ -491,7 +497,11 @@ function cleanupIntro() {
   if (introClickChild) { try { introClickChild.kill(); } catch {} introClickChild = null; }
   try { fs.unlinkSync(INTRO_FLAG); } catch {}
   // The circle shrank into the notch — bring it back as the normal UI.
-  if (win && !win.isDestroyed()) { collapse(); win.showInactive(); }
+  if (win && !win.isDestroyed()) {
+    collapse();
+    win.webContents.send("intro-visible", true);
+    try { win.setAlwaysOnTop(true, "screen-saver"); } catch {}   // re-assert z-order
+  }
   if (introWin && !introWin.isDestroyed()) {
     const w = introWin;
     introWin = null;
