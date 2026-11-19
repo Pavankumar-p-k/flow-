@@ -230,6 +230,81 @@ function startMediaWatcher() {
   });
 }
 
+/* ---------- Notification mirror (#2) ----------
+   Windows toasts -> the linked WhatsApp chat, so the phone sees what the
+   desktop shows. Watcher script (UserNotificationListener) emits one JSON
+   line per new toast; we dedupe, rate-cap and forward. */
+
+let notifyChild = null;
+let notifyBuf = "";
+const notifRecent = new Map(); // key -> last ms (dedupe)
+const notifTimes = [];         // send timestamps (rate cap)
+const NOTIFY_RATE_MAX = 8;     // per minute
+const NOTIFY_BLOCK = /whatsapp|agent-notch|notchytest|electron/i;
+
+function friendlyApp(id) {
+  if (!id) return "Windows";
+  // AUMID forms: "PackageHash_abc!App" | "C:\path\app.exe" | "App.exe"
+  let s = String(id);
+  if (s.includes("\\")) s = s.split("\\").pop();
+  s = s.split("!")[0];
+  s = s.replace(/_[A-Za-z0-9]{10,}$/, "");
+  return s || "Windows";
+}
+
+function mirrorNotification(n) {
+  try {
+    if (!config || config.notifyMirror === false) return;
+    const texts = Array.isArray(n.texts) ? n.texts.filter(Boolean) : [];
+    if (!texts.length) return;
+    const app = friendlyApp(n.app);
+    if (NOTIFY_BLOCK.test(app) || NOTIFY_BLOCK.test(n.app || "")) return; // no echo loops
+    const title = String(texts[0]).slice(0, 120);
+    const body = texts.slice(1).join(" · ").slice(0, 400);
+    const key = app + "|" + title + "|" + body;
+    const now = Date.now();
+
+    // dedupe: identical toast repeated within 60s
+    for (const [k, t] of notifRecent) if (now - t > 60000) notifRecent.delete(k);
+    if (notifRecent.has(key)) return;
+    notifRecent.set(key, now);
+
+    // rate cap: sliding 60s window
+    while (notifTimes.length && now - notifTimes[0] > 60000) notifTimes.shift();
+    if (notifTimes.length >= NOTIFY_RATE_MAX) return;
+    notifTimes.push(now);
+
+    const msg = "🔔 " + app + ": " + title + (body ? "\n" + body : "");
+    ilog("NOTIFY mirror " + msg.replace(/\n/g, " ").slice(0, 140));
+    wa.send(msg.slice(0, 1500));
+  } catch (e) { ilog("NOTIFY mirror err " + e.message); }
+}
+
+function startNotifyWatcher() {
+  if (config && config.notifyMirror === false) return;
+  const script = path.join(APP_DIR, "scripts", "notify-watch.ps1");
+  notifyChild = spawn(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
+    { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }
+  );
+  notifyChild.stdout.setEncoding("utf8");
+  notifyChild.stdout.on("data", (chunk) => {
+    notifyBuf += chunk;
+    let idx;
+    while ((idx = notifyBuf.indexOf("\n")) >= 0) {
+      const line = notifyBuf.slice(0, idx).trim();
+      notifyBuf = notifyBuf.slice(idx + 1);
+      if (!line) continue;
+      try { mirrorNotification(JSON.parse(line)); } catch { /* partial */ }
+    }
+  });
+  notifyChild.on("exit", () => {
+    notifyChild = null;
+    setTimeout(startNotifyWatcher, 5000);
+  });
+}
+
 ipcMain.on("media", (_e, action) => {
   const allowed = ["playpause", "next", "prev", "stop"];
   if (!allowed.includes(action)) return;
@@ -683,6 +758,7 @@ app.whenReady().then(async () => {
   setInterval(cleanOldScreenshots, 12 * 60 * 60 * 1000);
   cleanOldScreenshots();
   startMediaWatcher();
+  startNotifyWatcher();
   // Ensure 24/7: register autostart on first run
   if (!(await regQuery())) await regAdd();
 
