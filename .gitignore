@@ -4,3 +4,4 @@ debug.log
 wa-outbox.txt
 queue-pending.json
 reminders.json
+digest-state.json

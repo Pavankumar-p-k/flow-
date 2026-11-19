@@ -231,6 +231,7 @@ const HELP = [
   "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
   "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
   "clipboard:  copy <text>  ·  clipboard / paste  (read it back)",
+  "digest — daily summary (auto 09:00 · digest at 18:00 to reschedule)",
   "system:  \"how many tabs are open\" · \"what app is in front\"",
   "",
   "to answer a prompt:  allow / always / reject",
@@ -311,6 +312,90 @@ function pumpReminders() {
     log("reminder fired #" + r.id + " " + String(r.text).slice(0, 50));
     wa.send("⏰ reminder: " + r.text);
   }
+}
+
+/* ---------- daily digest (#8) ----------
+   One summary a day, pushed to the chat at a set time (default 09:00;
+   config.json {"digest":{"hour":9,"minute":0}} or "digest at 18:00").
+   If the PC was off at that time it fires late on boot — exactly once. */
+
+const DIGEST_STATE = path.join(__dirname, "digest-state.json");
+let digestState = { day: null, hour: null, minute: null };
+try { digestState = Object.assign(digestState, JSON.parse(fs.readFileSync(DIGEST_STATE, "utf8"))); } catch {}
+let digestTimer = null;
+
+function saveDigestState() {
+  try { fs.writeFileSync(DIGEST_STATE, JSON.stringify(digestState)); } catch {}
+}
+
+function digestCfg() {
+  const cfg = { hour: 9, minute: 0, enabled: true };
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf8"));
+    if (c && c.digest === false) cfg.enabled = false;
+    else if (c && c.digest && typeof c.digest === "object") {
+      if (typeof c.digest.hour === "number") cfg.hour = c.digest.hour;
+      if (typeof c.digest.minute === "number") cfg.minute = c.digest.minute;
+      if (c.digest.enabled === false) cfg.enabled = false;
+    }
+  } catch {}
+  if (digestState.hour != null) { cfg.hour = digestState.hour; cfg.minute = digestState.minute || 0; } // "digest at" wins
+  return cfg;
+}
+
+async function fmtDigest() {
+  const st0 = getState ? getState() : null;
+  const lines = ["🗞 NOTCH DAILY DIGEST — " + new Date().toDateString()];
+  if (st0) {
+    const active = Object.keys(st0.active || {}).length;
+    lines.push("opencode: " + (st0.online ? "online" : "OFFLINE") +
+      " · sessions: " + ((st0.sessions || []).length) + " · active: " + active);
+    const st = st0.stats;
+    if (st && st.tokens) {
+      const t = st.tokens;
+      const total = (t.input || 0) + (t.output || 0) + (t.reasoning || 0) + ((t.cache && t.cache.read) || 0);
+      lines.push("tokens 24h: " + fmtNum(total) + " (in " + fmtNum(t.input || 0) + " · out " + fmtNum(t.output || 0) + ")");
+    }
+    if (st && st.tools && st.tools.totals) {
+      const tt = st.tools.totals;
+      lines.push("tools: " + (tt.succeeded || 0) + "/" + (tt.calls || 0) + " ok · " + (tt.failed || 0) + " failed");
+    }
+  }
+  const endToday = new Date();
+  endToday.setHours(23, 59, 59, 999);
+  const today = reminders.filter((r) => r.at <= endToday.getTime()).sort((a, b) => a.at - b.at);
+  if (today.length) {
+    lines.push("", "⏰ reminders today:");
+    for (const r of today.slice(0, 6)) lines.push("  • " + fmtWhen(r.at) + " — " + r.text);
+  }
+  try {
+    const list = await repos.list(true);
+    const dirty = list.filter((r) => r.ok && r.dirty);
+    const ahead = list.filter((r) => r.ok && r.ahead);
+    lines.push("", "📁 repos: " + list.length + " · " + dirty.length + " dirty" + (ahead.length ? " · " + ahead.length + " ahead" : ""));
+    if (dirty.length) for (const r of dirty.slice(0, 5)) lines.push("  • " + r.name + " [" + (r.branch || "?") + "] " + r.dirty + " dirty");
+    else if (list.length) lines.push("  all clean ✅");
+  } catch { lines.push("", "📁 repos: unavailable"); }
+  if (pending.size) lines.push("", "⏳ " + pending.size + " prompt(s) waiting for your reply");
+  return lines.join("\n");
+}
+
+async function sendDigest() {
+  const text = await fmtDigest();
+  log("digest sent (" + text.length + " chars)");
+  for (const c of chunkReply(text)) await wa.send(c);
+}
+
+function pumpDigest(nowOverride) {
+  if (!wa) return;
+  const cfg = digestCfg();
+  if (!cfg.enabled) return;
+  const now = nowOverride || new Date();
+  if (digestState.day === now.toDateString()) return;
+  if (now.getHours() < cfg.hour || (now.getHours() === cfg.hour && now.getMinutes() < cfg.minute)) return;
+  digestState.day = now.toDateString();
+  saveDigestState(); // mark BEFORE sending — a crash can never double-send
+  sendDigest().catch((e) => log("digest err " + e.message));
 }
 
 /* ---------- unified FIFO task queue ----------
@@ -564,6 +649,30 @@ async function routeIncoming(raw, text) {
   }
   m = raw.match(/^\/?\s*(?:clipboard|clip|paste)\s*$/i);
   if (m) return enqueue("clipboard", sendClipboard);
+
+  // daily digest (#8): "digest" sends now · "digest at 18:00" reschedules
+  m = raw.match(/^\/?\s*(?:digest|daily)\b\s*(.*)$/i);
+  if (m) {
+    const arg = m[1].trim();
+    if (arg) {
+      const w = parseWhen(arg);
+      if (w) {
+        const d = new Date(w.at);
+        digestState.hour = d.getHours();
+        digestState.minute = d.getMinutes();
+        saveDigestState();
+        return enqueue("digest schedule", () =>
+          wa.send("🗞 daily digest rescheduled to " +
+            String(digestState.hour).padStart(2, "0") + ":" + String(digestState.minute).padStart(2, "0") +
+            " — auto-sends daily (late is fine if the PC was off)"));
+      }
+      return enqueue("digest", () =>
+        wa.send("⚠️ usage: digest (send now) · digest at 18:00 (reschedule)"));
+    }
+    return enqueue("digest", async () => {
+      for (const c of chunkReply(await fmtDigest())) await wa.send(c);
+    });
+  }
 
   switch (low) {
     case "help":
@@ -984,6 +1093,12 @@ async function start(deps) {
   if (remindTimer) clearInterval(remindTimer);
   remindTimer = setInterval(pumpReminders, 10000);
 
+  // #8 — daily digest: catch up immediately (missed while the PC was off),
+  // then check once a minute until the day's copy has gone out.
+  pumpDigest();
+  if (digestTimer) clearInterval(digestTimer);
+  digestTimer = setInterval(pumpDigest, 60000);
+
   // #10 — replay messages that were queued when the app last died.
   if (pendingRaw.length) {
     const leftover = pendingRaw.slice();
@@ -1032,7 +1147,8 @@ async function start(deps) {
 function stop() {
   running = false;
   if (remindTimer) { clearInterval(remindTimer); remindTimer = null; }
+  if (digestTimer) { clearInterval(digestTimer); digestTimer = null; }
   try { if (abort) abort.abort(); } catch {}
 }
 
-module.exports = { start, stop, handleIncoming, pending, pushPending, runAction, parseWhen };
+module.exports = { start, stop, handleIncoming, pending, pushPending, runAction, parseWhen, pumpDigest, digestCfg };
