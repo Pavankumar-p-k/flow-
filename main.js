@@ -58,6 +58,7 @@ if (!config || !config.ntfyTopic) {
 }
 
 function notify(title, message, tags) {
+  if (bridge.isDnd && bridge.isDnd()) return; // #10 DND silences the ntfy push
   if (!config || config.notifyEnabled === false || !config.ntfyTopic) return;
   try {
     fetch("https://ntfy.sh/", {
@@ -254,6 +255,7 @@ function friendlyApp(id) {
 
 function mirrorNotification(n) {
   try {
+    if (bridge.isDnd && bridge.isDnd()) return; // #10 DND silences the 🔔 mirror
     if (!config || config.notifyMirror === false) return;
     const texts = Array.isArray(n.texts) ? n.texts.filter(Boolean) : [];
     if (!texts.length) return;

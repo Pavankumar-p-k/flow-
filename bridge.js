@@ -272,6 +272,7 @@ const HELP = [
   "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
   "control:  stop / stop current  ·  skip   (preempt what's running NOW)",
   "queue — show running/waiting tasks  ·  clear — drop the waiting ones",
+  "dnd — do not disturb: dnd on 30m · dnd off (silences push + 🔔 mirror)",
   "clipboard:  copy <text>  ·  clipboard / paste  (read it back)",
   "digest — daily summary (auto 09:00 · digest at 18:00 to reschedule)",
   "system:  \"how many tabs are open\" · \"what app is in front\"",
@@ -440,6 +441,71 @@ function pumpDigest(nowOverride) {
   sendDigest().catch((e) => log("digest err " + e.message));
 }
 
+/* ---------- do not disturb (#10 tier-1) ----------
+   DND silences the UNPROMPTED channels only: the ntfy phone push and the
+   🔔 notification mirror (both gated in main.js via isDnd()). Commands,
+   approvals, reminders, digest and replies still go through — the user
+   asked for those. Survives restarts via dnd.json {until}. */
+
+const DND_FILE = path.join(__dirname, "dnd.json");
+let dndUntil = 0;
+try {
+  const d = JSON.parse(fs.readFileSync(DND_FILE, "utf8"));
+  if (d && typeof d.until === "number" && d.until > Date.now()) dndUntil = d.until;
+} catch {}
+
+function saveDnd() {
+  try {
+    if (dndUntil > Date.now()) fs.writeFileSync(DND_FILE, JSON.stringify({ until: dndUntil }));
+    else if (fs.existsSync(DND_FILE)) fs.unlinkSync(DND_FILE);
+  } catch {}
+}
+
+function isDnd() { return dndUntil > Date.now(); }
+
+function fmtDur(ms) {
+  const s = Math.ceil(ms / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.round(ms / 60000);
+  if (m < 60) return m + "m";
+  const h = Math.floor(m / 60);
+  return (m % 60) ? h + "h " + (m % 60) + "m" : h + "h";
+}
+
+function parseDndDur(arg) {
+  if (!arg) return 60 * 60 * 1000;                                     // "dnd on" -> 1h
+  const bare = arg.match(/^(\d+)$/);                                   // "dnd on 90" -> 90 min
+  if (bare) return Number(bare[1]) * 60000;
+  const w = parseWhen(/^in\s+/i.test(arg) ? arg : "in " + arg);        // "30m" / "2h"
+  if (w) return Math.max(1000, w.at - Date.now());
+  return null;
+}
+
+function dndStatus() {
+  if (!isDnd()) return "☀️ DND is off.";
+  const d = new Date(dndUntil);
+  return "🌙 DND active — " + fmtDur(dndUntil - Date.now()) + " left (until " +
+    String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") + ")";
+}
+
+function handleDnd(arg) {
+  if (!arg || /^(status|check)$/i.test(arg)) return wa.send(dndStatus());
+  if (/^(off|disable|end)$/i.test(arg)) {
+    dndUntil = 0;
+    saveDnd();
+    log("dnd off");
+    return wa.send("☀️ DND off — notifications back on.");
+  }
+  const rest = /^on\b\s*/i.test(arg) ? arg.replace(/^on\b\s*/i, "") : arg;
+  const dur = parseDndDur(rest.trim());
+  if (dur === null) return wa.send("⚠️ usage: dnd on 30m · dnd off · dnd (status)");
+  dndUntil = Date.now() + dur;
+  saveDnd();
+  log("dnd on for " + fmtDur(dur));
+  return wa.send("🌙 DND on for " + fmtDur(dur) +
+    " — ntfy push + 🔔 mirror silenced (commands, approvals, reminders still come through)");
+}
+
 /* ---------- unified FIFO task queue ----------
    Every incoming message becomes a task. Tasks run strictly one at a time
    in arrival order — commands, approvals and assistant requests alike —
@@ -602,6 +668,9 @@ async function routeIncoming(raw, text) {
   // queue observability/management — also immediate (see fmtQueue).
   if (/^\/?\s*queue\s*$/i.test(raw)) return wa.send(fmtQueue());
   if (/^\/?\s*clear(?:\s+queue)?\s*$/i.test(raw)) return clearQueue();
+  // DND — must take effect NOW, even while a task is running
+  const dm = raw.match(/^\/?\s*(?:dnd|quiet|donotdisturb)\b\s*(.*)$/i);
+  if (dm) return handleDnd(dm[1].trim());
 
   // numbered: "<n> allow|always|reject>" — re-resolved when it actually runs,
   // so a prompt answered or cancelled while queued reports accurately.
@@ -1250,4 +1319,4 @@ function stop() {
   try { if (abort) abort.abort(); } catch {}
 }
 
-module.exports = { start, stop, handleIncoming, pending, pushPending, runAction, parseWhen, pumpDigest, digestCfg };
+module.exports = { start, stop, handleIncoming, pending, pushPending, runAction, parseWhen, pumpDigest, digestCfg, isDnd };
