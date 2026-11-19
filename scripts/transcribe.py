@@ -10,6 +10,13 @@ Run: python scripts/transcribe.py <audio-path>
 import json
 import sys
 
+# Windows stdout defaults to cp1252 — Telugu transcripts would crash print()
+# with charmap errors. Always emit UTF-8.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
 MODEL = "large-v3-turbo"   # multilingual; auto-detects Telugu vs English per note
 _model = None
 

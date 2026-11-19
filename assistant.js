@@ -7,11 +7,45 @@ const path = require("path");
 const os = require("os");
 const { runPs } = require("./psrun");
 const sheettext = require("./sheettext");
+const { spawn } = require("child_process");
 
 // formats whose bytes are a ZIP/XML container (or plain text) — extract to
-// text before prompting; everything else (images, pdf…) stays a attachment.
+// text before prompting; images stay vision attachments, pdfs go through
+// pdfscan.py (text + rendered pages), everything else attaches as-is.
 function sheetExt(ext) {
   return [".xlsx", ".xlsm", ".docx", ".pptx", ".csv", ".tsv", ".txt", ".md", ".json", ".log"].includes(ext);
+}
+
+/* #pdf — PDFs are binary; the model can't read them from a base64
+   attachment. scripts/pdfscan.py extracts the text AND (for scanned/diagram
+   PDFs) renders pages to PNG so the model can look at them with vision.
+   Returns { ok, text, images[], error }. */
+function runPdfScan(filePath) {
+  return new Promise((resolve) => {
+    const py = process.env.VOICE_PYTHON || "python";
+    const outDir = path.join(__dirname, "chat-inbox");
+    let child;
+    try {
+      child = spawn(py, [path.join(__dirname, "scripts", "pdfscan.py"), filePath, outDir],
+        { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (e) { resolve({ ok: false, text: "", images: [], error: e.message }); return; }
+    let out = "", err = "";
+    const killer = setTimeout(() => { try { child.kill(); } catch {} }, 60000);
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { err += d; });
+    child.on("close", () => {
+      clearTimeout(killer);
+      try {
+        const line = out.trim().split("\n").pop() || "";
+        const j = JSON.parse(line);
+        if (j.error) { resolve({ ok: false, text: "", images: [], error: j.error }); return; }
+        resolve({ ok: true, text: j.text || "", images: j.images || [], error: "" });
+      } catch (e) {
+        resolve({ ok: false, text: "", images: [], error: String(err).slice(0, 200) || "no output" });
+      }
+    });
+    child.on("error", (e) => { clearTimeout(killer); resolve({ ok: false, text: "", images: [], error: e.message }); });
+  });
 }
 
 const SERVICE_FILE = path.join(os.homedir(), ".local", "state", "opencode", "service.json");
@@ -43,7 +77,7 @@ const PROTOCOL = [
   "They send short free-form lines. Help them find and retrieve files on this Windows PC,",
   "launch apps, control music, and open websites. Understand their natural language — no fixed commands.",
   "Actually search the disk with Glob/Grep/Read. Home: C:\\Users\\peter.",
-  "Screenshots: C:\\Users\\peter\\OneDrive\\Pictures\\Screenshots. Blender files usually sit in C:\\Users\\peter\\Documents.",
+  "Screenshots: C:\\Users\\peter\\OneDrive\\Pictures\\Screenshots (existing captures, named notch-yyyy-MM-dd-HHmmss.png — the timestamp IS the capture time). Blender files usually sit in C:\\Users\\peter\\Documents.",
   "Reply BRIEFLY and plainly — it renders as one chat bubble. No markdown headers, no bullet walls.",
   "SYSTEM AWARENESS — every message carries a LIVE SYSTEM SNAPSHOT: the foreground window, all open windows, and per-browser tab counts. Answer \"what's open\", \"which app is in front\", \"how many tabs\" directly from it — no tools needed. If it's absent, say you couldn't read the system state.",
   "",
@@ -51,7 +85,7 @@ const PROTOCOL = [
   "<files>",
   "C:\\full\\path\\to\\file.ext",
   "</files>",
-  "INBOUND FILES — the user may attach a photo or document to their message; it arrives as a file on this turn. Images arrive as vision attachments; spreadsheets/documents arrive ALREADY EXTRACTED as plain text in the prompt (see \"CONTENT OF\" / \"[Sheet:\" markers) — answer from that text. Examine attachments before answering. With no caption, the text is just \"what is in this image?\" / \"what is in this document?\" — answer from the attachment itself. If you cannot read it, say so plainly instead of guessing.",
+  "INBOUND FILES — the user may attach a photo or document to their message; it arrives as a file on this turn. Images arrive as vision attachments; spreadsheets/documents arrive ALREADY EXTRACTED as plain text in the prompt (see \"CONTENT OF\" / \"[Sheet:\" markers); PDFs arrive as extracted text and/or rendered page images — answer from those. Examine attachments before answering. With no caption, the text is just \"what is in this image?\" / \"what is in this document?\" — answer from the attachment itself. If you cannot read it, say so plainly instead of guessing.",
   "Leave the block out entirely when there is nothing to send. Never invent a path.",
   "",
   "ACTIONS — to make the PC do things, put action lines in this block at the very end of your reply:",
@@ -64,7 +98,7 @@ const PROTOCOL = [
   "- browser:URL  → open a URL in the default browser (must include https://). For \"search the web for X\" you may browse yourself and answer in text instead.",
   "- file:PATH  → open a file or folder with its default app.",
   "- focus:TITLE  → bring an existing window to the front (substring of its title), e.g. focus:Notepad or focus:Google Chrome.",
-  "- screenshot:screen | screenshot:window | screenshot:<title>  → capture a FRESH screenshot right now and send the PNG into the chat. Use for \"take a screenshot\", \"screenshot current window\", \"screenshot of chrome\". window = the app currently in front; <title> = that app's window.",
+  "- screenshot:screen | screenshot:window | screenshot:<title>  → capture a FRESH screenshot right now and send the PNG into the chat. ONLY for \"take a screenshot\", \"screenshot current window\", \"screenshot of chrome\", \"show my screen\" — i.e. the user wants what the screen looks like RIGHT NOW. window = the app currently in front; <title> = that app's window.\n  OLD SCREENSHOTS: if the user asks for an OLD / earlier / saved screenshot (\"my old screenshot\", \"the screenshot from yesterday\", \"send me that screenshot I took\"), do NOT emit screenshot: — that captures a NEW one and is wrong. Instead list C:\\Users\\peter\\OneDrive\\Pictures\\Screenshots (files are named notch-yyyy-MM-dd-HHmmss.png), pick by date, and send it via the <files> block.",
   "- remind:in 10m TEXT | remind:at 18:30 TEXT | remind:tomorrow 9am TEXT  → set a reminder; the user gets a ping in this chat when it's due. Use for \"remind me to …\", \"in 10 minutes tell me to …\". Time forms: in <n><s|m|h|d>, at <HH:MM> [am/pm], tomorrow <H:MM> [am/pm].",
   "- copy:TEXT  → put TEXT on the PC clipboard so the user can paste it on the desktop. Use for \"copy this to my clipboard\", \"copy the error\", \"put the key on my clipboard\".",
   "- clipboard:  → READ the PC clipboard (write nothing after the colon); the bridge sends its content back as a chat message. Use for \"what's in my clipboard\", \"what did I copy\", \"paste what I copied\".",
@@ -348,12 +382,32 @@ async function askOnce(userText, retried, inFiles) {
           const p = String(f);
           if (!fs.existsSync(p)) continue;
           if (fs.statSync(p).size > MAX_FILE_BYTES) continue;
-          // #7-fix — spreadsheets/documents are BINARY zips: the model can't
-          // read them from a base64 attachment (it answered from chat context
-          // instead of the sheet). Extract cells/paragraphs to text and put
-          // THAT in the prompt; images keep going as vision attachments.
           const ext = path.extname(p).toLowerCase();
-          if (sheetExt(ext)) {
+          // #pdf — binary PDFs: extract text, and render scanned/diagram
+          // pages to PNG so the model can READ them (vision) instead of
+          // saying "I got the file but I can't read it".
+          if (ext === ".pdf") {
+            const scan = await runPdfScan(p);
+            if (scan.ok) {
+              if (scan.text.trim()) {
+                text += "\n\nCONTENT OF " + path.basename(p) + " (extracted text):\n" + scan.text;
+              }
+              for (const img of scan.images) {
+                if (fs.existsSync(img)) {
+                  atts.push({ uri: "file:///" + img.replace(/\\/g, "/"), name: path.basename(img) });
+                }
+              }
+              log("pdfscan " + path.basename(p) + ": " + scan.text.length + " chars, " +
+                scan.images.length + " page image(s)");
+              continue;
+            }
+            log("pdfscan failed " + path.basename(p) + ": " + scan.error);
+            // fall through — attach the original binary as a last resort
+          } else if (sheetExt(ext)) {
+            // spreadsheets/documents are BINARY zips: the model can't read
+            // them from a base64 attachment (it answered from chat context
+            // instead of the sheet). Extract cells/paragraphs to text and put
+            // THAT in the prompt; images keep going as vision attachments.
             const ex = sheettext.extract(p);
             if (ex.ok) {
               text += "\n\nCONTENT OF " + path.basename(p) + ":" + ex.text;
@@ -491,4 +545,4 @@ async function askOnce(userText, retried, inFiles) {
 
 restore();
 
-module.exports = { ask, notify, get sessionID() { return sessionID; }, MAX_FILE_BYTES };
+module.exports = { ask, notify, get sessionID() { return sessionID; }, MAX_FILE_BYTES, _runPdfScan: runPdfScan };
