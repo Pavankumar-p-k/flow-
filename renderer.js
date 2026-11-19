@@ -542,6 +542,89 @@ window.notch.onWaEvent((e) => {
   if (e.type === "repos") { reposCache = e.items || []; renderRepos(); }
 });
 
+/* ---------- drag-drop → WhatsApp (#9) ----------
+   The window is click-through outside the notch rects, so a drag can leave
+   the window without a dragleave — a 500ms watchdog clears the veil when
+   dragover events stop arriving. */
+let dragDepth = 0;
+let dragWatch = null;
+let dropToastTimer = null;
+
+function isFileDrag(e) {
+  const dt = e.dataTransfer;
+  return !!dt && !!dt.types && Array.from(dt.types).indexOf("Files") !== -1;
+}
+
+function showDropToast(msg, ms) {
+  const el = $("drop-toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(dropToastTimer);
+  dropToastTimer = setTimeout(() => el.classList.remove("show"), ms || 4000);
+}
+
+function armDragWatch() {
+  clearTimeout(dragWatch);
+  dragWatch = setTimeout(() => {
+    dragDepth = 0;
+    document.body.classList.remove("dropping");
+  }, 500);
+}
+
+document.addEventListener("dragenter", (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dragDepth++;
+  document.body.classList.add("dropping");
+  armDragWatch();
+});
+
+document.addEventListener("dragover", (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "copy";
+  // the window is click-through until the hover watch un-ignores it (100ms
+  // tick), so the initial dragenter can be missed — recover on dragover
+  if (!document.body.classList.contains("dropping")) {
+    dragDepth = Math.max(dragDepth, 1);
+    document.body.classList.add("dropping");
+  }
+  armDragWatch();
+});
+
+document.addEventListener("dragleave", (e) => {
+  if (!isFileDrag(e)) return;
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) document.body.classList.remove("dropping");
+});
+
+document.addEventListener("drop", (e) => {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dragDepth = 0;
+  clearTimeout(dragWatch);
+  document.body.classList.remove("dropping");
+  const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+  const paths = [];
+  for (const f of files) {
+    try {
+      const p = window.notch.getPathForFile(f);
+      if (p) paths.push(p);
+    } catch {}
+  }
+  if (!paths.length) { showDropToast("⚠️ couldn't read those files"); return; }
+  showDropToast("📤 sending " + paths.length + " file(s) to WhatsApp…", 6000);
+  window.notch.filesDropped(paths);
+});
+
+window.notch.onDropStatus((d) => {
+  if (!d) return;
+  if (d.error) { showDropToast("⚠️ " + d.error, 4500); return; }
+  let msg = d.sent ? "✅ sent " + d.sent + " file(s) to WhatsApp" : "⚠️ nothing sent";
+  if (d.rejected && d.rejected.length) msg += " · skipped " + d.rejected.length + ": " + d.rejected[0];
+  showDropToast(msg, 4500);
+});
+
 renderWa();
 renderPending();
 renderRepos();

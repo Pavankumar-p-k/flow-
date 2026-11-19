@@ -922,6 +922,66 @@ html, body {
   color: var(--amber);
 }
 
+/* ---------- drag-drop → WhatsApp (#9) ---------- */
+/* Full-window veil while files hover the notch; pointer-events:none so the
+   drop itself still lands on the document beneath. */
+#drop-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 90;
+  display: none;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 4px;
+  pointer-events: none;
+  background: rgba(0, 0, 0, .62);
+  border: 2px dashed var(--green);
+  border-radius: 0 0 var(--r) var(--r);
+}
+body.dropping #drop-veil { display: flex; animation: dropveil .16s ease; }
+@keyframes dropveil { from { opacity: 0; } to { opacity: 1; } }
+
+#drop-veil-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 7px 14px;
+  background: var(--chip);
+  border: 1px solid var(--chip-hi);
+  border-radius: 999px;
+}
+#drop-veil-ico { font-size: 14px; }
+#drop-veil-txt {
+  font: 700 11px/1 var(--mono);
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--green);
+  white-space: nowrap;
+}
+
+#drop-toast {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%) translateY(6px);
+  z-index: 91;
+  max-width: 92%;
+  padding: 6px 13px;
+  background: rgba(10, 10, 12, .95);
+  border: 1px solid var(--chip-hi);
+  border-radius: 999px;
+  font: 600 11px/1.35 var(--mono);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .2s ease, transform .2s var(--ease);
+}
+#drop-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }

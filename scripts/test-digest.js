@@ -2,12 +2,19 @@
    digest-state.json is shared with the running app — saved and restored. */
 const fs = require("fs");
 const path = require("path");
-const bridge = require("../bridge");
 
 const STATE = path.join(__dirname, "..", "digest-state.json");
 let original = null;
 let hadState = false;
 try { original = fs.readFileSync(STATE, "utf8"); hadState = true; } catch {}
+
+// The live app may have already marked TODAY's digest as sent — bridge reads
+// this file at require time, so reset BEFORE requiring it. hour:24 suppresses
+// the boot catch-up pump (real time is past 09:00) until "digest at 18:00"
+// installs the schedule the test wants. Restored at the end.
+try { fs.writeFileSync(STATE, JSON.stringify({ day: null, hour: 24, minute: 0 })); } catch {}
+
+const bridge = require("../bridge");
 
 function restoreState() {
   try {
@@ -36,12 +43,23 @@ const state = {
 
 const digests = () => sent.filter((s) => s.includes("DAILY DIGEST"));
 
+// sendDigest() scans 15+ repos and can take several seconds — poll instead
+// of guessing a fixed delay.
+async function waitFor(fn, ms) {
+  const end = Date.now() + (ms || 20000);
+  while (Date.now() < end) {
+    if (fn()) return true;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return fn();
+}
+
 (async () => {
   await bridge.start({ whatsapp: fakeWa, getState: () => state, onEvent: () => {} });
 
   // manual send now
   await bridge.handleIncoming("digest");
-  await new Promise((r) => setTimeout(r, 4000)); // repos scan takes a moment
+  await waitFor(() => digests().length >= 1);
   t("manual digest sends", digests().length === 1, JSON.stringify(sent));
   t("digest carries status", (digests()[0] || "").includes("sessions: 2") && (digests()[0] || "").includes("tokens 24h"), digests()[0] || "");
   t("digest carries repos", (digests()[0] || "").includes("📁 repos:"), digests()[0] || "");
@@ -59,7 +77,7 @@ const digests = () => sent.filter((s) => s.includes("DAILY DIGEST"));
 
   // after the hour: exactly one auto-send
   bridge.pumpDigest(new Date(2026, 10, 19, 19, 0));
-  await new Promise((r) => setTimeout(r, 4000));
+  await waitFor(() => digests().length >= 2);
   t("auto digest fires after hour", digests().length === 2, String(digests().length));
 
   // later that day: never twice
@@ -69,7 +87,7 @@ const digests = () => sent.filter((s) => s.includes("DAILY DIGEST"));
 
   // next day (still past the rescheduled 18:00 hour): fires again
   bridge.pumpDigest(new Date(2026, 10, 20, 19, 0));
-  await new Promise((r) => setTimeout(r, 4000));
+  await waitFor(() => digests().length >= 3);
   t("fires again next day", digests().length === 3, String(digests().length));
 
   // bad usage hint

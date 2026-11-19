@@ -539,6 +539,38 @@ ipcMain.on("shots-send", (_e, p) => {
   if (shotPathOk(p) && fs.existsSync(p)) wa.sendFile(p, path.basename(p));
 });
 
+/* ---------- drag-drop → WhatsApp (#9 tier-3) ----------
+   The renderer hands us absolute paths (webUtils.getPathForFile); we validate
+   count/size here, then reuse the paced outbox. Files dropped while WhatsApp
+   is offline sit in the outbox and flush on reconnect. */
+const dropfiles = require("./dropfiles");
+
+ipcMain.on("files-dropped", (_e, list) => {
+  try {
+    const { ok, rejected } = dropfiles.validateDrop(list);
+    const st = wa.getStatus();
+    if (ok.length && st.status !== "open") {
+      if (win && !win.isDestroyed()) {
+        win.webContents.send("drop-status", {
+          sent: 0, rejected: rejected.map((r) => r.name + ": " + r.reason),
+          error: "WhatsApp is not linked — link it first, then drop again",
+        });
+      }
+      return;
+    }
+    for (const p of ok) wa.sendFile(p, path.basename(p));
+    ilog("DROP queued " + ok.length + " file(s), rejected " + rejected.length);
+    if (win && !win.isDestroyed()) {
+      win.webContents.send("drop-status", {
+        sent: ok.length,
+        rejected: rejected.map((r) => r.name + ": " + r.reason),
+      });
+    }
+  } catch (e) {
+    ilog("DROP err " + e.message);
+  }
+});
+
 function spawnPsRetry(args, tries = 2) {
   try {
     const c = spawn("powershell.exe", args, { windowsHide: true, stdio: "ignore" });

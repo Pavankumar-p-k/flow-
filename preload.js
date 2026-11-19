@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("notch", {
   onState: (cb) => ipcRenderer.on("state", (_e, d) => cb(d)),
@@ -23,6 +23,11 @@ contextBridge.exposeInMainWorld("notch", {
   shotsList: () => ipcRenderer.invoke("shots-list"),
   shotsOpen: (p) => ipcRenderer.send("shots-open", p),
   shotsSend: (p) => ipcRenderer.send("shots-send", p),
+  // Drag-drop onto the notch (#9) — File.path is gone in Electron 45,
+  // webUtils.getPathForFile is the only way back to a real path.
+  getPathForFile: (file) => webUtils.getPathForFile(file),
+  filesDropped: (paths) => ipcRenderer.send("files-dropped", paths),
+  onDropStatus: (cb) => ipcRenderer.on("drop-status", (_e, d) => cb(d)),
   onWaStatus: (cb) => ipcRenderer.on("wa-status", (_e, d) => cb(d)),
   onWaQr: (cb) => ipcRenderer.on("wa-qr", (_e, d) => cb(d)),
   onWaEvent: (cb) => ipcRenderer.on("wa-event", (_e, d) => cb(d)),
