@@ -58,6 +58,8 @@ const PROTOCOL = [
   "- focus:TITLE  → bring an existing window to the front (substring of its title), e.g. focus:Notepad or focus:Google Chrome.",
   "- screenshot:screen | screenshot:window | screenshot:<title>  → capture a FRESH screenshot right now and send the PNG into the chat. Use for \"take a screenshot\", \"screenshot current window\", \"screenshot of chrome\". window = the app currently in front; <title> = that app's window.",
   "- remind:in 10m TEXT | remind:at 18:30 TEXT | remind:tomorrow 9am TEXT  → set a reminder; the user gets a ping in this chat when it's due. Use for \"remind me to …\", \"in 10 minutes tell me to …\". Time forms: in <n><s|m|h|d>, at <HH:MM> [am/pm], tomorrow <H:MM> [am/pm].",
+  "- copy:TEXT  → put TEXT on the PC clipboard so the user can paste it on the desktop. Use for \"copy this to my clipboard\", \"copy the error\", \"put the key on my clipboard\".",
+  "- clipboard:  → READ the PC clipboard (write nothing after the colon); the bridge sends its content back as a chat message. Use for \"what's in my clipboard\", \"what did I copy\", \"paste what I copied\".",
   "MUSIC RECIPE — to play a specific song: a YouTube /results SEARCH page never plays anything, so never emit one for a play request. Instead: (1) use browser tools to find a direct link — browser_navigate to https://www.youtube.com/results?search_query=<song>, then browser_read_links and take the FIRST /watch?v=VIDEO_ID link; (2) emit browser:https://www.youtube.com/watch?v=VIDEO_ID as your action. Chrome autoplays direct watch URLs immediately. One search, first link, done — keep it under ~20 seconds. For pause/next/prev while something is already playing, just emit the media: action.",
   "SPEED RULE — for app / browser / focus requests, emit the action block IMMEDIATELY and reply in one line. Do NOT run shell commands: shell here is slow and often access-denied. Browser tools are allowed ONLY for the music recipe above and for answering web questions.",
   "NEVER launch a program by simulating keys or clicking the UI (no Win+R, no Start-menu clicking, no explorer tricks) — that is slow and fails. Launching = the app: action, always. Use open-computer-use tools only for WORKING INSIDE an already-open app.",
@@ -233,10 +235,12 @@ function extractActions(text) {
     clean = text.replace(block[0], "");
     for (const line of block[1].split(/\r?\n/)) {
       const s = line.trim().replace(/^[-*•]\s*/, "");
-      const m = s.match(/^(app|media|browser|file|focus|screenshot|remind)\s*:\s*(.+)$/i);
+      const m = s.match(/^(app|media|browser|file|focus|screenshot|remind|copy|clipboard)\s*:\s*(.*)$/i);
       if (!m) continue;
       const value = m[2].trim().replace(/^["'`]|["'`]$/g, "");
-      if (value) actions.push({ type: m[1].toLowerCase(), value });
+      const type = m[1].toLowerCase();
+      // "clipboard:" is a read — an empty value is the point; other types need one.
+      if (value || type === "clipboard") actions.push({ type, value });
     }
   }
   return { reply: clean.replace(/\n{3,}/g, "\n\n").trim(), actions };

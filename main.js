@@ -817,6 +817,7 @@ app.whenReady().then(async () => {
     bridge.start({
       whatsapp: wa,
       getState: () => lastState,
+      clipboard, // #7 — clipboard actions from chat
       onEvent: (e) => {
         if (win && !win.isDestroyed()) win.webContents.send("wa-event", e);
       },

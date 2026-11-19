@@ -122,6 +122,43 @@ function resolveSession(n) {
   return { id, title: (s && (s.title || s.id)) || id };
 }
 
+/* ---------- clipboard actions (#7) ----------
+   Electron clipboard injected by main.js via start() (bridge runs in the
+   main process; injecting keeps this module testable in plain node). */
+
+let clip = null;
+
+async function copyToClipboard(text) {
+  if (!clip) return "⚠️ clipboard unavailable.";
+  try {
+    clip.writeText(String(text));
+    return "📋 copied " + String(text).length + " chars to the PC clipboard — paste it anywhere.";
+  } catch (e) { return "⚠️ copy failed: " + e.message; }
+}
+
+async function readClipboard() {
+  if (!clip) return { msg: "⚠️ clipboard unavailable." };
+  try {
+    const text = clip.readText() || "";
+    if (text.trim()) return { msg: "📋 CLIPBOARD (" + text.length + " chars):\n" + text.slice(0, 3500) };
+    const img = clip.readImage();
+    if (img && typeof img.isEmpty === "function" && !img.isEmpty() && typeof img.toPNG === "function") {
+      const p = path.join(os.tmpdir(), "notch-clip-" + Date.now() + ".png");
+      fs.writeFileSync(p, img.toPNG());
+      setTimeout(() => { try { fs.unlinkSync(p); } catch {} }, 120000);
+      return { msg: "📋 clipboard has an image — sending it below.", file: p };
+    }
+    return { msg: "📋 clipboard is empty." };
+  } catch (e) { return { msg: "⚠️ clipboard read failed: " + e.message }; }
+}
+
+async function sendClipboard() {
+  const r = await readClipboard();
+  log("clipboard read: " + (r.file ? "image" : r.msg.split("\n")[0].slice(0, 70)));
+  await wa.send(r.msg);
+  if (r.file) await wa.sendFile(r.file, "clipboard image");
+}
+
 function fmtStatus(state) {
   const st = state && state.stats;
   const active = Object.keys(state && state.active ? state.active : {}).length;
@@ -193,6 +230,7 @@ const HELP = [
   "screenshots:  /screenshot  ·  /screenshot window  ·  /screenshot <app title>",
   "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
   "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
+  "clipboard:  copy <text>  ·  clipboard / paste  (read it back)",
   "system:  \"how many tabs are open\" · \"what app is in front\"",
   "",
   "to answer a prompt:  allow / always / reject",
@@ -511,6 +549,22 @@ async function routeIncoming(raw, text) {
     });
   }
 
+  // clipboard (#7): "copy <text>" -> PC clipboard; "clipboard"/"paste" -> read it back
+  m = raw.match(/^\/?\s*copy(?:\s+([\s\S]+))?$/i);
+  if (m) {
+    const text = (m[1] || "").trim();
+    if (text) {
+      return enqueue("copy", async () => {
+        const msg = await copyToClipboard(text);
+        log("clipboard copy: " + (msg.startsWith("📋") ? text.length + " chars" : msg));
+        return wa.send(msg);
+      });
+    }
+    return enqueue("clipboard", sendClipboard);
+  }
+  m = raw.match(/^\/?\s*(?:clipboard|clip|paste)\s*$/i);
+  if (m) return enqueue("clipboard", sendClipboard);
+
   switch (low) {
     case "help":
     case "commands":
@@ -586,6 +640,16 @@ async function askAssistant(text, depth = 0) {
       } else {
         await wa.send("⚠️ couldn't read that reminder time — try: remind in 10m <text>");
       }
+      continue;
+    }
+    if (String(a.type).toLowerCase() === "copy") {
+      // #7 — assistant-parsed clipboard write: "copy:<text>".
+      await wa.send(await copyToClipboard(a.value));
+      continue;
+    }
+    if (String(a.type).toLowerCase() === "clipboard") {
+      // #7 — "clipboard:" (no value) reads the PC clipboard back into chat.
+      await sendClipboard();
       continue;
     }
     const ok = runAction(a);
@@ -911,6 +975,7 @@ async function start(deps) {
   wa = deps.whatsapp;
   getState = deps.getState;
   onEvent = deps.onEvent;
+  clip = deps.clipboard || null; // #7 — electron clipboard (optional in tests)
   if (running) return;
   running = true;
 
