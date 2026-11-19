@@ -159,6 +159,46 @@ async function sendClipboard() {
   if (r.file) await wa.sendFile(r.file, "clipboard image");
 }
 
+/* ---------- stop / skip (#9) — immediate control, bypasses the FIFO ----------
+   These exist to preempt the task that is running RIGHT NOW, so queueing
+   them behind it would defeat the purpose. They interrupt the active
+   OpenCode session(s) at once; "skip" additionally mutes the in-flight
+   assistant reply so the queue visibly moves on. */
+
+function activeIds() {
+  const st0 = getState ? getState() : null;
+  return { st0, ids: st0 && st0.active ? Object.keys(st0.active).filter(Boolean) : [] };
+}
+
+async function interruptActive(ids, st0) {
+  const names = [];
+  for (const id of ids) {
+    try { await api("POST", "/api/session/" + id + "/interrupt"); }
+    catch (e) { log("interrupt err " + id + ": " + e.message); }
+    names.push(sessionTitle(id, st0));
+  }
+  return names;
+}
+
+async function stopCurrent() {
+  const { st0, ids } = activeIds();
+  if (!ids.length) return wa.send("✅ no tasks running right now.");
+  const names = await interruptActive(ids, st0);
+  log("stop current: " + ids.length + " session(s)");
+  return wa.send("⏹ stopped the current task" + (ids.length > 1 ? "s" : "") + ":\n• " + names.join("\n• "));
+}
+
+async function skipCurrent() {
+  skipRequested = true; // in-flight assistant turn: drop its partial reply
+  const { st0, ids } = activeIds();
+  await interruptActive(ids, st0);
+  const waiting = taskQueue.length;
+  log("skip: interrupted " + ids.length + ", " + waiting + " queued behind");
+  if (!ids.length && !waiting) return wa.send("⏭ nothing running or queued.");
+  return wa.send("⏭ skipped the current task — next" +
+    (waiting ? " up (" + waiting + " queued)" : " (queue empty)"));
+}
+
 function fmtStatus(state) {
   const st = state && state.stats;
   const active = Object.keys(state && state.active ? state.active : {}).length;
@@ -230,6 +270,7 @@ const HELP = [
   "screenshots:  /screenshot  ·  /screenshot window  ·  /screenshot <app title>",
   "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
   "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
+  "control:  stop / stop current  ·  skip   (preempt what's running NOW)",
   "clipboard:  copy <text>  ·  clipboard / paste  (read it back)",
   "digest — daily summary (auto 09:00 · digest at 18:00 to reschedule)",
   "system:  \"how many tabs are open\" · \"what app is in front\"",
@@ -406,6 +447,7 @@ function pumpDigest(nowOverride) {
 const taskQueue = [];
 let taskRunning = false;
 const QUEUE_MAX = 8;
+let skipRequested = false; // #9 — "skip": in-flight assistant turn drops its reply
 
 /* #10 — pending tasks survive a crash/restart: every routed message text is
    written to queue-pending.json and removed when its task finishes; on boot
@@ -464,6 +506,7 @@ async function drainQueue() {
   try {
     while (taskQueue.length) {
       const t = taskQueue.shift();
+      skipRequested = false; // fresh task — a stale skip must not mute it
       log("queue run " + t.label);
       try {
         await t.fn();
@@ -509,6 +552,12 @@ async function routeIncoming(raw, text) {
   const low = raw.toLowerCase();
   const label = raw.slice(0, 44).replace(/\s+/g, " ");
   const st = () => (getState ? getState() : null);
+
+  // #9 — stop/skip are CONTROL signals: they act on whatever is running this
+  // instant, so they bypass the FIFO (a queued "stop" would arrive too late).
+  // "stop <n>" stays in the queue path below (targeted, not preemptive).
+  if (/^\/?\s*(?:stop|halt)(?:\s+(?:current|now|this))?\s*$/i.test(raw)) return stopCurrent();
+  if (/^\/?\s*skip\s*$/i.test(raw)) return skipCurrent();
 
   // numbered: "<n> allow|always|reject>" — re-resolved when it actually runs,
   // so a prompt answered or cancelled while queued reports accurately.
@@ -729,6 +778,12 @@ async function askAssistant(text, depth = 0) {
   await wa.send(depth === 0 ? "🧠 on it…" : "🔧 working…");
   log("assistant request: " + text.slice(0, 120).replace(/\n/g, " ") + (depth ? " (cont " + depth + ")" : ""));
   const res = await assistant.ask(text);
+  if (skipRequested) {
+    // #9 — user skipped while this turn was running: the session was already
+    // interrupted; don't dump the partial reply on them.
+    log("assistant reply dropped (skipped)");
+    return;
+  }
   for (const chunk of chunkReply(res.reply || "")) await wa.send(chunk);
   const actions = res.actions || [];
   if (!res.reply && actions.length) await wa.send("✅ done");
