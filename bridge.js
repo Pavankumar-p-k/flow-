@@ -268,6 +268,7 @@ const HELP = [
   "\"open github.com\" · \"send me my latest screenshot\"",
   "",
   "screenshots:  /screenshot  ·  /screenshot window  ·  /screenshot <app title>",
+  "attachments:  send a photo/file in the chat — I'll read it (max 16MB)",
   "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
   "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
   "control:  stop / stop current  ·  skip   (preempt what's running NOW)",
@@ -716,30 +717,35 @@ function clearQueue() {
 
 /* ---------- incoming WhatsApp messages ---------- */
 
-async function handleIncoming(text) {
+async function handleIncoming(text, files) {
   if (!wa) return;
   const raw = text.trim();
   curRaw = raw;
   try {
-    return await routeIncoming(raw, text);
+    return await routeIncoming(raw, text, files);
   } finally {
     curRaw = null;
   }
 }
 
-async function routeIncoming(raw, text) {
+async function routeIncoming(raw, text, files) {
   // Safety net: never parse our own outbound messages as commands, even if
   // an id mismatch lets an echo through the dedupe in whatsapp.js.
   if (/^(🔔|📊|📁|🤖|❓|✅|⚠️|❌|⏳|↩️|🗑|📸|🧠|🔧)/.test(raw)) return;
 
   // #17 — pocket double-tap: the exact same text again within 10s is a
   // duplicate, not a new request. Skip it silently (the first copy runs).
+  // #8 — attachments join the key: two caption-less photos share the same
+  // synthetic text, and only the file identity tells them apart.
   const now = Date.now();
-  if (raw === lastMsg.text && now - lastMsg.at < 10000) {
+  const dupKey = raw + (files && files.length
+    ? "\u0000" + files.map((f) => path.basename(String(f)).replace(/^\d+_/, "")).join(",")
+    : "");
+  if (dupKey === lastMsg.text && now - lastMsg.at < 10000) {
     log("duplicate suppressed: " + raw.slice(0, 50));
     return;
   }
-  lastMsg = { text: raw, at: now };
+  lastMsg = { text: dupKey, at: now };
 
   const low = raw.toLowerCase();
   const label = raw.slice(0, 44).replace(/\s+/g, " ");
@@ -956,7 +962,9 @@ async function routeIncoming(raw, text) {
         if (form) return enqueue("form answer", () => answerForm(form, raw));
       }
       // Otherwise treat it as a natural-language request for Notchy.
-      return enqueue(label, () => askAssistant(raw));
+      // #8 — files ride along with the ask (dropped after a restart-replay:
+      // enqueue only persists the raw text).
+      return enqueue(label, () => askAssistant(raw, 0, files));
     }
   }
 }
@@ -967,7 +975,7 @@ function looksLikeRequest(s) {
     || s.length > 120;
 }
 
-async function askAssistant(text, depth = 0) {
+async function askAssistant(text, depth = 0, files = null) {
   if (!assistant) return wa.send(HELP);
   // #14 — cap assistant turns per hour. Every turn (including <continue>
   // follow-ups) is a real model call, so all of them count.
@@ -977,8 +985,9 @@ async function askAssistant(text, depth = 0) {
   }
   // Acknowledge immediately — the agent can take a minute on a real search.
   await wa.send(depth === 0 ? "🧠 on it…" : "🔧 working…");
-  log("assistant request: " + text.slice(0, 120).replace(/\n/g, " ") + (depth ? " (cont " + depth + ")" : ""));
-  const res = await assistant.ask(text);
+  log("assistant request: " + text.slice(0, 120).replace(/\n/g, " ") +
+    (depth ? " (cont " + depth + ")" : "") + (files && files.length ? " +files" : ""));
+  const res = await assistant.ask(text, false, files);
   if (skipRequested) {
     // #9 — user skipped while this turn was running: the session was already
     // interrupted; don't dump the partial reply on them.

@@ -5,6 +5,149 @@ const fs = require("fs");
 const QRCode = require("qrcode");
 
 const AUTH_DIR = path.join(__dirname, "wa-auth");
+// #8 — inbound images/files from the phone are fetched here, then handed to
+// the assistant. 16MB cap: the prompt API inlines attachments as base64, so
+// a giant file would blow up the request body (and the free-model context).
+const INBOX_DIR = path.join(__dirname, "chat-inbox");
+const MAX_INBOX_BYTES = 16 * 1024 * 1024;
+
+// baileys' media downloader — bound inside connect() from the dynamic import;
+// tests inject their own via _setDownloader.
+let downloader = null;
+
+/* #8 — classify an inbound media message. Returns null for anything we don't
+   ingest (audio is #7, video/sticker unsupported). */
+function pickMedia(message) {
+  if (!message) return null;
+  const img = message.imageMessage;
+  if (img) {
+    return {
+      kind: "image",
+      mime: img.mimetype || "image/jpeg",
+      size: Number(img.fileLength) || 0,
+      name: img.fileName || "",
+    };
+  }
+  const doc = message.documentMessage;
+  if (doc) {
+    return {
+      kind: "document",
+      mime: doc.mimetype || "application/octet-stream",
+      size: Number(doc.fileLength) || 0,
+      name: doc.fileName || "",
+    };
+  }
+  return null;
+}
+
+const EXT_FOR_MIME = {
+  "image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+  "image/gif": ".gif", "image/bmp": ".bmp", "application/pdf": ".pdf",
+  "text/plain": ".txt", "text/markdown": ".md", "application/json": ".json",
+  "application/zip": ".zip", "text/csv": ".csv",
+};
+
+/* Write a downloaded blob into chat-inbox/ as <ts>_<name>. The name is
+   sanitized (no separators/traversal) and always carries an extension so the
+   model gets a sensible filename. Returns the absolute path. */
+function saveInbox(buf, name) {
+  fs.mkdirSync(INBOX_DIR, { recursive: true });
+  let safe = String(name || "").replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").slice(0, 80);
+  if (!safe || /^\.+$/.test(safe)) safe = "inbound";
+  if (!path.extname(safe)) safe += EXT_FOR_MIME[""] || ".bin";
+  const p = path.join(INBOX_DIR, Date.now() + "_" + safe);
+  fs.writeFileSync(p, buf);
+  return p;
+}
+
+/* Download one message's media into the inbox. Returns { files, note } —
+   note is a user-facing warning when nothing could be saved. */
+async function ingestMedia(m, media) {
+  if (media.size && media.size > MAX_INBOX_BYTES) {
+    return {
+      files: [],
+      note: "⚠️ that " + media.kind + " is " + Math.round(media.size / 1048576) +
+        "MB — over my 16MB limit, not sent.",
+    };
+  }
+  if (!downloader) return { files: [], note: "⚠️ media download isn't ready — try again in a moment." };
+  let buf;
+  try {
+    buf = await downloader(m);
+  } catch (e) {
+    log("media download failed: " + e.message);
+    return { files: [], note: "⚠️ couldn't download that " + media.kind +
+      " (" + String(e.message).slice(0, 60) + "). Try sending it again." };
+  }
+  if (!buf || !buf.length) {
+    return { files: [], note: "⚠️ couldn't download that " + media.kind + " — try sending it again." };
+  }
+  if (buf.length > MAX_INBOX_BYTES) {
+    return { files: [], note: "⚠️ that " + media.kind + " is over my 16MB limit, not sent." };
+  }
+  let name = media.name;
+  if (!name) name = "inbound" + (EXT_FOR_MIME[media.mime] || ".bin");
+  const p = saveInbox(buf, name);
+  log("inbox saved " + path.basename(p) + " (" + buf.length + "B)");
+  return { files: [p], note: "" };
+}
+
+/* What the assistant sees when the user attached media without typing. */
+function syntheticText(media) {
+  return media.kind === "image" ? "what is in this image?" : "what is in this document?";
+}
+
+/* Per-message pipeline, extracted so tests can drive it without a socket.
+   `type` gates media download: "notify" = fresh phone message, "append" =
+   history sync / our own echoes — those are never downloaded. */
+async function processMessage(m, type) {
+  if (!m || !m.message) return;
+  const jid = m.key.remoteJid || "";
+  const text =
+    m.message.conversation ||
+    (m.message.extendedTextMessage && m.message.extendedTextMessage.text) ||
+    (m.message.imageMessage && m.message.imageMessage.caption) ||
+    (m.message.documentMessage && m.message.documentMessage.caption) ||
+    "";
+  const media = type === "notify" ? pickMedia(m.message) : null;
+
+  // Diagnostics: log everything we see so filters can be verified.
+  log(
+    "recv type=" + type + " jid=" + jid + " fromMe=" + !!m.key.fromMe +
+    " id=" + (m.key.id || "") +
+    " media=" + (media ? media.kind + ":" + media.name : "-") +
+    " text=" + JSON.stringify(text.slice(0, 60))
+  );
+
+  if (!text.trim() && !media) return;
+  // Ignore our own outgoing messages (we track their ids) so a reply
+  // never re-triggers the command parser and loops.
+  if (m.key.id && sentIds.has(m.key.id)) return;
+  // A sent document/image echoes back with its fileName as the text.
+  // That must never be read as a fresh request.
+  if (text.trim() && wasRecentlySent(text)) {
+    log("skip echo " + JSON.stringify(text.slice(0, 60)));
+    return;
+  }
+  // Only the self-chat. The chat jid may be the PN form we derived, or
+  // a LID form; messages sent from this phone arrive with fromMe=true
+  // because both ends are the same account.
+  if (!isSelfChatJid(jid)) return;
+
+  let files = [];
+  if (media) {
+    const ing = await ingestMedia(m, media);
+    files = ing.files;
+    // Nothing usable arrived — say so instead of forwarding an empty ask.
+    if (!files.length) {
+      if (ing.note) send(ing.note);
+      if (!text.trim()) return;
+    }
+  }
+  const body = text.trim() || (files.length ? syntheticText(media) : "");
+  if (!body) return;
+  if (handlers.onMessage) handlers.onMessage(body, files);
+}
 
 let sock = null;
 let selfJid = null;          // our own chat ("Message yourself")
@@ -114,6 +257,11 @@ async function connect() {
   }
   const makeWASocket = baileys.makeWASocket || baileys.default;
   const { useMultiFileAuthState, DisconnectReason } = baileys;
+  // #8 — media download context: reupload refreshes expired media URLs.
+  downloader = (msg) => baileys.downloadMediaMessage(
+    msg, "buffer", {},
+    { reuploadRequest: (x) => sock.updateMediaMessage(x), logger: sock.logger },
+  );
 
   let state, saveCreds;
   try {
@@ -180,37 +328,7 @@ async function connect() {
     if (type !== "notify" && type !== "append") return;
     for (const m of messages) {
       try {
-        if (!m || !m.message) continue;
-        const jid = m.key.remoteJid || "";
-        const fromMe = !!m.key.fromMe;
-        const text =
-          m.message.conversation ||
-          (m.message.extendedTextMessage && m.message.extendedTextMessage.text) ||
-          (m.message.imageMessage && m.message.imageMessage.caption) ||
-          "";
-
-        // Diagnostics: log everything we see so filters can be verified.
-        log(
-          "recv type=" + type + " jid=" + jid + " fromMe=" + fromMe +
-          " id=" + (m.key.id || "") + " text=" + JSON.stringify(text.slice(0, 60))
-        );
-
-        if (!text.trim()) continue;
-        // Ignore our own outgoing messages (we track their ids) so a reply
-        // never re-triggers the command parser and loops.
-        if (m.key.id && sentIds.has(m.key.id)) continue;
-        // A sent document/image echoes back with its fileName as the text.
-        // That must never be read as a fresh request.
-        if (wasRecentlySent(text)) {
-          log("skip echo " + JSON.stringify(text.slice(0, 60)));
-          continue;
-        }
-        // Only the self-chat. The chat jid may be the PN form we derived, or
-        // a LID form; messages sent from this phone arrive with fromMe=true
-        // because both ends are the same account.
-        if (!isSelfChatJid(jid)) continue;
-
-        if (handlers.onMessage) handlers.onMessage(text.trim());
+        await processMessage(m, type);
       } catch (e) {
         log("message error: " + e.message);
       }
@@ -328,6 +446,23 @@ function getStatus() {
   return { status, qr: qrDataUrl, error: lastError, jid: selfJid };
 }
 
+/* #8 — downloaded media piles up; delete inbox files older than 7 days. */
+function cleanInbox() {
+  try {
+    if (!fs.existsSync(INBOX_DIR)) return 0;
+    const cut = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    let removed = 0;
+    for (const f of fs.readdirSync(INBOX_DIR)) {
+      const p = path.join(INBOX_DIR, f);
+      try {
+        if (fs.statSync(p).mtimeMs < cut) { fs.unlinkSync(p); removed++; }
+      } catch {}
+    }
+    if (removed) log("cleaned " + removed + " inbox file(s) older than 7 days");
+    return removed;
+  } catch { return 0; }
+}
+
 module.exports = {
   connect,
   send,
@@ -335,5 +470,16 @@ module.exports = {
   disconnect,
   forget,
   getStatus,
+  cleanInbox,
   on: (h) => Object.assign(handlers, h),
+  // #8 — test seams (no live socket needed)
+  _pickMedia: pickMedia,
+  _saveInbox: saveInbox,
+  _processMessage: processMessage,
+  _setDownloader: (fn) => { downloader = fn; },
+  _sentIds: sentIds,
+  _outbox: outbox,
+  _rememberSelfJid: rememberSelfJid,
+  _INBOX_DIR: INBOX_DIR,
+  _MAX_INBOX_BYTES: MAX_INBOX_BYTES,
 };

@@ -378,11 +378,13 @@ wa.on({
   onQr: (dataUrl) => {
     if (win && !win.isDestroyed()) win.webContents.send("wa-qr", dataUrl);
   },
-  onMessage: (text) => {
+  onMessage: (text, files) => {
     try {
-      fs.appendFileSync(path.join(APP_DIR, "debug.log"), new Date().toISOString() + " WA_RECV " + text.slice(0, 120).replace(/\n/g, " | ") + "\n");
+      fs.appendFileSync(path.join(APP_DIR, "debug.log"), new Date().toISOString() + " WA_RECV " +
+        (files && files.length ? "[+" + files.length + " file] " : "") +
+        text.slice(0, 120).replace(/\n/g, " | ") + "\n");
     } catch {}
-    bridge.handleIncoming(text);
+    bridge.handleIncoming(text, files);
   },
 });
 
@@ -834,6 +836,9 @@ app.whenReady().then(async () => {
   rotateLogIfHuge();
   setInterval(cleanOldScreenshots, 12 * 60 * 60 * 1000);
   cleanOldScreenshots();
+  // #8 — downloaded chat media also expires; same 7-day window.
+  setInterval(() => wa.cleanInbox(), 12 * 60 * 60 * 1000);
+  wa.cleanInbox();
   startMediaWatcher();
   startNotifyWatcher();
   // Ensure 24/7: register autostart on first run

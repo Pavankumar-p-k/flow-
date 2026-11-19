@@ -44,6 +44,7 @@ const PROTOCOL = [
   "<files>",
   "C:\\full\\path\\to\\file.ext",
   "</files>",
+  "INBOUND FILES — the user may attach a photo or document to their message; it arrives as a file on this turn. Examine it (vision/Read) before answering. With no caption, the text is just \"what is in this image?\" / \"what is in this document?\" — answer from the attachment itself. If you cannot read it, say so plainly instead of guessing.",
   "Leave the block out entirely when there is nothing to send. Never invent a path.",
   "",
   "ACTIONS — to make the PC do things, put action lines in this block at the very end of your reply:",
@@ -289,24 +290,25 @@ function activitySig(list, t0) {
 
 /* ---------- public API ---------- */
 
-async function ask(userText, retried = false) {
+async function ask(userText, retried = false, files = null) {
   if (busy) return { reply: "Still working on your last request — send that again in a minute.", files: [], actions: [], busy: true };
   busy = true;
   let res;
   try {
-    res = await askOnce(userText, retried);
+    res = await askOnce(userText, retried, files);
   } finally {
     busy = false;
     waiter = null;
   }
   // #13 — model fallback: askOnce flagged a quota/model failure and we
   // pinned the next free model; retry now that cleanup has run (a retry
-  // from inside askOnce would race its own finally).
-  if (res && res.__retry) return ask(userText, true);
+  // from inside askOnce would race its own finally). Files must ride along:
+  // a retry that drops them would answer a photo with "nothing came through".
+  if (res && res.__retry) return ask(userText, true, files);
   return res;
 }
 
-async function askOnce(userText, retried) {
+async function askOnce(userText, retried, inFiles) {
   try {
     const sid = await ensureSession();
     const t0 = Date.now();
@@ -326,7 +328,31 @@ async function askOnce(userText, retried) {
       + (snap ? "\n\nLIVE SYSTEM SNAPSHOT (right now):\n" + snap : "")
       + "\n\nUSER: " + userText;
 
-    const res = await api("POST", "/api/session/" + sid + "/prompt", { text: prompt });
+    // #8 — inbound attachments (photos/files from the phone). The prompt API
+    // inlines them as base64 from a file:/// URI — a plain path is a 400.
+    // (Parameter is `inFiles`: this try block declares its own `files` later
+    // via extractFiles — same name would be a TDZ error.)
+    const body = { text: prompt };
+    if (inFiles && inFiles.length) {
+      const atts = [];
+      for (const f of inFiles) {
+        try {
+          const p = String(f);
+          if (!fs.existsSync(p)) continue;
+          if (fs.statSync(p).size > MAX_FILE_BYTES) continue;
+          atts.push({
+            uri: /^file:\/\//i.test(p) ? p : "file:///" + p.replace(/\\/g, "/"),
+            name: path.basename(p),
+          });
+        } catch {}
+      }
+      if (atts.length) {
+        body.files = atts;
+        log("attaching " + atts.length + " file(s): " + atts.map((a) => a.name).join(", "));
+      }
+    }
+
+    const res = await api("POST", "/api/session/" + sid + "/prompt", body);
     const startedAt = (res.data && res.data.time && res.data.time.created) || t0;
 
     // Poll for an idle marker after our prompt; SSE notify short-circuits it.

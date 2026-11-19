@@ -6,3 +6,4 @@ queue-pending.json
 reminders.json
 digest-state.json
 dnd.json
+chat-inbox/
