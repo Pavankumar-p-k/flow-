@@ -47,7 +47,15 @@ html, body {
   display: flex;
   justify-content: center;
   align-items: flex-start;
+  transition: opacity .3s ease;
 }
+
+/* ---------- full-screen auto-dim (#fs) ----------
+   Game / movie / F11 video covering the monitor → notch quietly dims to 30%.
+   Same size, same panels; hovering expands it (body.fs-dim #notch.expanded)
+   back to full brightness. */
+body.fs-dim #notch { opacity: .3; }
+body.fs-dim #notch.expanded { opacity: 1; }
 
 /* ---------- shoulder flares (Dexter .nt-sh) ----------
    12x12 concave wedges that blend the black shape into the screen edge */

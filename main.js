@@ -309,6 +309,51 @@ function startNotifyWatcher() {
   });
 }
 
+/* ---------- full-screen auto-dim (#fs) ----------
+   A persistent PowerShell watcher reports the foreground window: when a game
+   / video player / F11 browser covers a whole monitor WITHOUT a caption bar,
+   the notch dims to 30% (same size, same panels) so it stays out of the
+   picture. Hovering expands it back to full brightness (renderer CSS). */
+
+let fsChild = null;
+let fsBuf = "";
+let lastFs = null;
+
+function applyFullscreen(on, app) {
+  // The intro overlay is itself a borderless full-screen window — ignore
+  // every heartbeat while it owns the screen; resetting lastFs makes the
+  // first line after intro-close count as fresh state.
+  if (introWin && !introWin.isDestroyed()) { lastFs = null; return; }
+  if (on === lastFs) return;
+  lastFs = on;
+  ilog("FULLSCREEN " + (on ? "on" + (app ? " " + app : "") : "off"));
+  if (win && !win.isDestroyed()) win.webContents.send("fullscreen", on);
+}
+
+function startFullscreenWatcher() {
+  const script = path.join(APP_DIR, "scripts", "fullscreen-watch.ps1");
+  fsChild = spawn(
+    "powershell.exe",
+    ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
+    { windowsHide: true, stdio: ["ignore", "pipe", "ignore"] }
+  );
+  fsChild.stdout.setEncoding("utf8");
+  fsChild.stdout.on("data", (chunk) => {
+    fsBuf += chunk;
+    let idx;
+    while ((idx = fsBuf.indexOf("\n")) >= 0) {
+      const line = fsBuf.slice(0, idx).trim();
+      fsBuf = fsBuf.slice(idx + 1);
+      if (!line) continue;
+      try { const j = JSON.parse(line); applyFullscreen(!!j.on, j.app || ""); } catch { /* partial */ }
+    }
+  });
+  fsChild.on("exit", () => {
+    fsChild = null;
+    setTimeout(startFullscreenWatcher, 5000);
+  });
+}
+
 ipcMain.on("media", (_e, action) => {
   const allowed = ["playpause", "next", "prev", "stop"];
   if (!allowed.includes(action)) return;
@@ -841,6 +886,7 @@ app.whenReady().then(async () => {
   wa.cleanInbox();
   startMediaWatcher();
   startNotifyWatcher();
+  startFullscreenWatcher();
   // Ensure 24/7: register autostart on first run
   if (!(await regQuery())) await regAdd();
 
@@ -876,6 +922,7 @@ app.on("window-all-closed", (e) => {
 
 app.on("before-quit", () => {
   if (mediaChild) { try { mediaChild.kill(); } catch {} }
+  if (fsChild) { try { fsChild.kill(); } catch {} }
   if (animTimer) clearInterval(animTimer);
   if (introClickTimer) clearInterval(introClickTimer);
   if (introClickChild) { try { introClickChild.kill(); } catch {} }

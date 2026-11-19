@@ -257,6 +257,11 @@ document.querySelectorAll(".pg-tab, .pg-dot").forEach((el) => {
 // transparent-window painting on Windows) while the intro overlay runs.
 window.notch.onIntroVisible((v) => { $("notch").classList.toggle("intro-hidden", !v); });
 
+// #fs — full-screen video/game detected: dim the notch (body class keeps it
+// safe from the wholesale className writes on #notch). CSS handles hover:
+// expanded (i.e. the mouse is on it) restores full brightness.
+window.notch.onFullscreen((v) => { document.body.classList.toggle("fs-dim", !!v); });
+
 function setSub(pageEl, subId) {
   if (!pageEl || !subId) return;
   const subs = [...pageEl.querySelectorAll(".sub")];
