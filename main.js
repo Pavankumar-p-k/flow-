@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, clipboard, globalShortcut } = require("electron");
+const { app, BrowserWindow, ipcMain, screen, Tray, Menu, nativeImage, clipboard, globalShortcut, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
@@ -493,6 +493,47 @@ function cleanOldScreenshots() {
     if (removed) ilog("cleaned " + removed + " screenshot(s) older than 7 days");
   } catch {}
 }
+
+/* ---------- Screenshot gallery (#4) ----------
+   Recent captures (notch + user) in SHOT_DIR as thumbnail data URLs; click
+   opens the file, the ↗ button pushes it into the WhatsApp chat. */
+function shotThumb(p) {
+  try {
+    const img = nativeImage.createFromPath(p);
+    if (!img || img.isEmpty()) return "";
+    const sz = img.getSize();
+    if (!sz.width) return "";
+    const w = 220;
+    const h = Math.max(1, Math.round((sz.height / sz.width) * w));
+    return img.resize({ width: w, height: h }).toDataURL();
+  } catch { return ""; }
+}
+
+ipcMain.handle("shots-list", () => {
+  try {
+    const files = fs.readdirSync(SHOT_DIR)
+      .filter((f) => /\.(png|jpe?g|webp|bmp)$/i.test(f))
+      .map((f) => {
+        const p = path.join(SHOT_DIR, f);
+        try { const st = fs.statSync(p); return { name: f, path: p, mtime: st.mtimeMs }; } catch { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, 30);
+    return files.map((s) => ({ name: s.name, path: s.path, mtime: s.mtime, thumb: shotThumb(s.path) }));
+  } catch { return []; }
+});
+
+function shotPathOk(p) {
+  return typeof p === "string" && p.startsWith(SHOT_DIR) && /\.(png|jpe?g|webp|bmp)$/i.test(p);
+}
+
+ipcMain.on("shots-open", (_e, p) => {
+  if (shotPathOk(p)) shell.openPath(p).catch(() => {});
+});
+ipcMain.on("shots-send", (_e, p) => {
+  if (shotPathOk(p) && fs.existsSync(p)) wa.sendFile(p, path.basename(p));
+});
 
 function spawnPsRetry(args, tries = 2) {
   try {

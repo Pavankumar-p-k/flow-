@@ -19,6 +19,10 @@ contextBridge.exposeInMainWorld("notch", {
   waCommand: (t) => ipcRenderer.send("wa-command", t),
   waStatus: () => ipcRenderer.invoke("wa-status"),
   waRepos: () => ipcRenderer.invoke("wa-repos"),
+  // Screenshot gallery (#4)
+  shotsList: () => ipcRenderer.invoke("shots-list"),
+  shotsOpen: (p) => ipcRenderer.send("shots-open", p),
+  shotsSend: (p) => ipcRenderer.send("shots-send", p),
   onWaStatus: (cb) => ipcRenderer.on("wa-status", (_e, d) => cb(d)),
   onWaQr: (cb) => ipcRenderer.on("wa-qr", (_e, d) => cb(d)),
   onWaEvent: (cb) => ipcRenderer.on("wa-event", (_e, d) => cb(d)),

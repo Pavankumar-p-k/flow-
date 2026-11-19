@@ -263,6 +263,7 @@ function setSub(pageEl, subId) {
   if (!subs.some((s) => s.id === subId)) return;
   pageEl.querySelectorAll(".sub-tab").forEach((b) => b.classList.toggle("active", b.dataset.sub === subId));
   subs.forEach((s) => s.classList.toggle("active", s.id === subId));
+  if (subId === "w-shots") loadShots(); // #4 — refresh the gallery each open
   try { localStorage.setItem("sub-" + pageEl.id, subId); } catch {}
 }
 
@@ -467,6 +468,56 @@ async function refreshWaPage() {
       reposCache = await window.notch.waRepos();
       renderRepos();
     } catch {}
+  }
+}
+
+/* ---------- screenshot gallery (#4) ---------- */
+let shotsLoaded = false;
+
+function fmtShotTime(ms) {
+  const d = new Date(ms);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return sameDay ? hm : d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + hm;
+}
+
+async function loadShots() {
+  const grid = $("shots-grid");
+  if (!grid) return;
+  if (!shotsLoaded) grid.innerHTML = '<div class="empty">loading…</div>';
+  try {
+    const shots = await window.notch.shotsList();
+    $("shots-count").textContent = String(shots.length);
+    if (!shots.length) {
+      grid.innerHTML = '<div class="empty">no screenshots yet — ask for one in chat</div>';
+      return;
+    }
+    grid.innerHTML = shots.map((s, i) => (
+      '<div class="shot" data-i="' + i + '" title="' + escapeAttr(s.name) + '">' +
+      (s.thumb
+        ? '<img class="shot-img" src="' + s.thumb + '" alt="" draggable="false"/>'
+        : '<div class="shot-img shot-ph">' + escapeHtml(s.name.slice(0, 18)) + "</div>") +
+      '<span class="shot-when">' + escapeHtml(fmtShotTime(s.mtime)) + "</span>" +
+      '<button class="shot-send" data-i="' + i + '" title="send to chat">&#8599;</button>' +
+      "</div>"
+    )).join("");
+    shotsLoaded = true;
+    grid.querySelectorAll(".shot").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        if (e.target.closest(".shot-send")) return;
+        window.notch.shotsOpen(shots[Number(el.dataset.i)].path);
+      });
+    });
+    grid.querySelectorAll(".shot-send").forEach((b) => {
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        window.notch.shotsSend(shots[Number(b.dataset.i)].path);
+        b.textContent = "✓";
+        setTimeout(() => { b.innerHTML = "&#8599;"; }, 1500);
+      });
+    });
+  } catch (e) {
+    grid.innerHTML = '<div class="empty">gallery unavailable</div>';
   }
 }
 
