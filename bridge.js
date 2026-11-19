@@ -1155,7 +1155,8 @@ function describe(p) {
 async function answerPrompt(item, choice, raw) {
   const reply = choice === "always" ? "always" : choice === "reject" || choice === "deny" ? "reject" : "once";
   try {
-    await api("POST", "/api/session/" + item.sessionID + "/permission/" + item.id + "/reply", { reply });
+    // OpenCode ≥2.x expects {decision: "once"|"always"|"reject"} — {reply} is a 400.
+    await api("POST", "/api/session/" + item.sessionID + "/permission/" + item.id + "/reply", { decision: reply });
     pending.delete(item.id);
     pushPending();
     log("permission " + item.id + " -> " + reply);
@@ -1301,7 +1302,8 @@ async function handleEvent(ev) {
     case "permission.replied":
     case "form.replied":
     case "form.cancelled": {
-      const id = ev.data && (ev.data.id || ev.data.permissionID || ev.data.formID);
+      // permission.replied carries {sessionID, requestID, reply}
+      const id = ev.data && (ev.data.requestID || ev.data.id || ev.data.permissionID || ev.data.formID);
       if (id && pending.has(id)) { pending.delete(id); pushPending(); }
       break;
     }
