@@ -58,6 +58,7 @@ if (!config || !config.ntfyTopic) {
 }
 
 function notify(title, message, tags) {
+  config = loadConfig() || config; // #3 — chat "config" edits take effect live
   if (bridge.isDnd && bridge.isDnd()) return; // #10 DND silences the ntfy push
   if (!config || config.notifyEnabled === false || !config.ntfyTopic) return;
   try {
@@ -255,6 +256,7 @@ function friendlyApp(id) {
 
 function mirrorNotification(n) {
   try {
+    config = loadConfig() || config; // #3 — chat edits take effect live
     if (bridge.isDnd && bridge.isDnd()) return; // #10 DND silences the 🔔 mirror
     if (!config || config.notifyMirror === false) return;
     const texts = Array.isArray(n.texts) ? n.texts.filter(Boolean) : [];

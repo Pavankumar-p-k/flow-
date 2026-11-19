@@ -273,6 +273,7 @@ const HELP = [
   "control:  stop / stop current  ·  skip   (preempt what's running NOW)",
   "queue — show running/waiting tasks  ·  clear — drop the waiting ones",
   "dnd — do not disturb: dnd on 30m · dnd off (silences push + 🔔 mirror)",
+  "config — view · config mirror off · config digest 18:00 (live settings)",
   "clipboard:  copy <text>  ·  clipboard / paste  (read it back)",
   "digest — daily summary (auto 09:00 · digest at 18:00 to reschedule)",
   "system:  \"how many tabs are open\" · \"what app is in front\"",
@@ -506,6 +507,90 @@ function handleDnd(arg) {
     " — ntfy push + 🔔 mirror silenced (commands, approvals, reminders still come through)");
 }
 
+/* ---------- config from chat (#10 tier-2 / item 3) ----------
+   Whitelisted settings edited from WhatsApp; main.js re-reads config.json
+   before every notify/mirror so changes are live without a restart. */
+
+function readConfigFile() {
+  try {
+    const c = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf8"));
+    return c && typeof c === "object" ? c : {};
+  } catch { return {}; }
+}
+
+function writeConfigFile(c) {
+  try { fs.writeFileSync(path.join(__dirname, "config.json"), JSON.stringify(c, null, 2)); }
+  catch (e) { log("config write err " + e.message); }
+}
+
+function fmtConfig() {
+  const c = readConfigFile();
+  const dc = digestCfg();
+  const lines = [
+    "⚙️ CONFIG (effective)",
+    "mirror (🔔 → WhatsApp): " + (c.notifyMirror !== false ? "on" : "off"),
+    "notify (ntfy push):     " + (c.notifyEnabled === false ? "off" : "on"),
+    "whatsapp bridge:        " + (c.whatsappEnabled === false ? "off (after restart)" : "on"),
+    "digest: " + String(dc.hour).padStart(2, "0") + ":" + String(dc.minute).padStart(2, "0") +
+      (digestState.hour != null ? " (quick override)" : ""),
+    "ntfy topic: " + (c.ntfyTopic ? String(c.ntfyTopic) : "(none)"),
+    "",
+    "set: config mirror off · config notify off · config digest 18:00 · config ntfy <topic>",
+  ];
+  return lines.join("\n");
+}
+
+const CONFIG_USAGE = "⚠️ usage: config (view) · config mirror off · config digest 18:00";
+
+function handleConfig(arg) {
+  if (!arg) return wa.send(fmtConfig());
+  const sm = arg.match(/^(\w+)\s+([\s\S]+)$/);
+  if (!sm) return wa.send(CONFIG_USAGE);
+  const key = sm[1].toLowerCase();
+  const val = sm[2].trim();
+
+  const BOOLS = { mirror: "notifyMirror", notify: "notifyEnabled", whatsapp: "whatsappEnabled" };
+  if (key in BOOLS) {
+    const b = /^(on|true|1|yes)$/i.test(val) ? true
+      : /^(off|false|0|no)$/i.test(val) ? false : null;
+    if (b === null) return wa.send(CONFIG_USAGE + " (" + key + ": on/off)");
+    const c = readConfigFile();
+    c[BOOLS[key]] = b;
+    writeConfigFile(c);
+    log("config " + key + " = " + b);
+    return wa.send("✅ " + key + " = " + (b ? "on" : "off") +
+      (key === "whatsapp" ? " (applies after restart)" : " — live now"));
+  }
+  if (key === "ntfy") {
+    if (!val || val.length > 120 || /\s/.test(val)) return wa.send(CONFIG_USAGE + " (ntfy: one topic word)");
+    const c = readConfigFile();
+    c.ntfyTopic = val;
+    writeConfigFile(c);
+    log("config ntfy topic saved");
+    return wa.send("✅ ntfy topic saved — set config notify on to push to it");
+  }
+  if (key === "digest") {
+    const dm = val.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
+    if (!dm) return wa.send(CONFIG_USAGE + " (digest: 18:00 or 9am)");
+    let h = Number(dm[1]);
+    const min = dm[2] ? Number(dm[2]) : 0;
+    const ap = (dm[3] || "").toLowerCase();
+    if (ap === "pm" && h < 12) h += 12;
+    if (ap === "am" && h === 12) h = 0;
+    if (h > 23 || min > 59) return wa.send(CONFIG_USAGE + " (digest: 18:00 or 9am)");
+    const c = readConfigFile();
+    c.digest = { hour: h, minute: min };
+    writeConfigFile(c);
+    digestState.hour = null; // config becomes the source; drop stale quick override
+    digestState.minute = null;
+    saveDigestState();
+    log("config digest = " + h + ":" + String(min).padStart(2, "0"));
+    return wa.send("✅ digest scheduled daily at " +
+      String(h).padStart(2, "0") + ":" + String(min).padStart(2, "0"));
+  }
+  return wa.send("⚠️ unknown setting '" + key + "' — try: mirror · notify · whatsapp · digest · ntfy");
+}
+
 /* ---------- unified FIFO task queue ----------
    Every incoming message becomes a task. Tasks run strictly one at a time
    in arrival order — commands, approvals and assistant requests alike —
@@ -671,6 +756,9 @@ async function routeIncoming(raw, text) {
   // DND — must take effect NOW, even while a task is running
   const dm = raw.match(/^\/?\s*(?:dnd|quiet|donotdisturb)\b\s*(.*)$/i);
   if (dm) return handleDnd(dm[1].trim());
+  // config view/set — immediate (a settings read queued behind a long task is useless)
+  const cm = raw.match(/^\/?\s*(?:config|settings)\b\s*(.*)$/i);
+  if (cm) return handleConfig(cm[1].trim());
 
   // numbered: "<n> allow|always|reject>" — re-resolved when it actually runs,
   // so a prompt answered or cancelled while queued reports accurately.
