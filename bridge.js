@@ -98,6 +98,30 @@ function fmtForm(form, state) {
   return lines.join("\n");
 }
 
+/* ---------- session control (#6) ----------
+   The numbered list shown by status/sessions is snapshotted, so "run 2 x"
+   resolves against exactly what the user last saw (session order can shift
+   between polls). Falls back to a fresh snapshot if none exists yet. */
+
+let sessionSnap = { ids: [], at: 0 };
+
+function snapSessions(state) {
+  const list = ((state && state.sessions) || []).slice(0, 5);
+  sessionSnap = { ids: list.map((s) => s.id), at: Date.now() };
+  return list;
+}
+
+function resolveSession(n) {
+  // build the snapshot only if we never showed a list; a bad number must NOT
+  // renumber what the user is looking at.
+  if (!sessionSnap.ids.length) snapSessions(getState ? getState() : null);
+  const id = sessionSnap.ids[n - 1];
+  if (!id) return null;
+  const state = getState ? getState() : null;
+  const s = state && state.sessions ? state.sessions.find((x) => x.id === id) : null;
+  return { id, title: (s && (s.title || s.id)) || id };
+}
+
 function fmtStatus(state) {
   const st = state && state.stats;
   const active = Object.keys(state && state.active ? state.active : {}).length;
@@ -117,12 +141,13 @@ function fmtStatus(state) {
     const tt = st.tools.totals;
     lines.push("tools: " + (tt.succeeded || 0) + "/" + (tt.calls || 0) + " ok · " + (tt.failed || 0) + " failed");
   }
-  const list = ((state && state.sessions) || []).slice(0, 5);
+  const list = snapSessions(state);
   if (list.length) {
-    lines.push("", "sessions:");
-    for (const s of list) {
+    lines.push("", "sessions  (run <n> <prompt> · stop <n>):");
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i];
       const busy = state.active && state.active[s.id] ? "▶" : "·";
-      lines.push(" " + busy + " " + (s.title || s.id).slice(0, 58));
+      lines.push(" " + (i + 1) + " " + busy + " " + (s.title || s.id).slice(0, 58));
     }
   }
   if (pending.size) lines.push("", "⏳ " + pending.size + " prompt(s) waiting for your reply");
@@ -167,6 +192,7 @@ const HELP = [
   "",
   "screenshots:  /screenshot  ·  /screenshot window  ·  /screenshot <app title>",
   "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
+  "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
   "system:  \"how many tabs are open\" · \"what app is in front\"",
   "",
   "to answer a prompt:  allow / always / reject",
@@ -446,6 +472,42 @@ async function routeIncoming(raw, text) {
       reminders.splice(i, 1);
       saveReminders();
       return wa.send("🗑 cancelled #" + id + ": " + r.text);
+    });
+  }
+
+  // session control (#6): "run <n> <prompt>" / "stop <n>" against the
+  // numbered list from status/sessions.
+  m = raw.match(/^\/?\s*run\s+#?(\d{1,2})\s+([\s\S]+)$/i);
+  if (m) {
+    const n = Number(m[1]);
+    const text = m[2].trim();
+    if (!text) return;
+    return enqueue("run #" + n, async () => {
+      const s = resolveSession(n);
+      if (!s) return wa.send("⚠️ no session #" + n + " — send \"sessions\" first.");
+      try {
+        await api("POST", "/api/session/" + s.id + "/prompt", { text });
+        log("session run #" + n + " -> " + s.id + ": " + text.slice(0, 60));
+        return wa.send("▶ sent to [" + n + "] " + s.title + ":\n" + text.slice(0, 300) +
+          "\n\n(ping me when done? the bridge reports finished sessions — or stop " + n + " to interrupt)");
+      } catch (e) {
+        return wa.send("⚠️ run failed: " + e.message);
+      }
+    });
+  }
+  m = raw.match(/^\/?\s*(?:stop|interrupt)\s+#?(\d{1,2})\s*$/i);
+  if (m) {
+    const n = Number(m[1]);
+    return enqueue("stop #" + n, async () => {
+      const s = resolveSession(n);
+      if (!s) return wa.send("⚠️ no session #" + n + " — send \"sessions\" first.");
+      try {
+        await api("POST", "/api/session/" + s.id + "/interrupt");
+        log("session stop #" + n + " -> " + s.id);
+        return wa.send("⏹ interrupted [" + n + "] " + s.title);
+      } catch (e) {
+        return wa.send("⚠️ stop failed: " + e.message);
+      }
     });
   }
 
