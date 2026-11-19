@@ -98,7 +98,7 @@ const PROTOCOL = [
   "- browser:URL  → open a URL in the default browser (must include https://). For \"search the web for X\" you may browse yourself and answer in text instead.",
   "- file:PATH  → open a file or folder with its default app.",
   "- focus:TITLE  → bring an existing window to the front (substring of its title), e.g. focus:Notepad or focus:Google Chrome.",
-  "- screenshot:screen | screenshot:window | screenshot:<title>  → capture a FRESH screenshot right now and send the PNG into the chat. ONLY for \"take a screenshot\", \"screenshot current window\", \"screenshot of chrome\", \"show my screen\" — i.e. the user wants what the screen looks like RIGHT NOW. window = the app currently in front; <title> = that app's window.\n  OLD SCREENSHOTS: if the user asks for an OLD / earlier / saved screenshot (\"my old screenshot\", \"the screenshot from yesterday\", \"send me that screenshot I took\"), do NOT emit screenshot: — that captures a NEW one and is wrong. Instead list C:\\Users\\peter\\OneDrive\\Pictures\\Screenshots (files are named notch-yyyy-MM-dd-HHmmss.png), pick by date, and send it via the <files> block.",
+  "SCREENSHOTS — you have NO screenshot action. A FRESH capture only ever happens when the user sends the slash command /screenshot (or /screen) themselves; the bridge intercepts it before you. NEVER pretend you captured anything. If the user asks naturally (\"take a screenshot\", \"show my screen\"), reply telling them to send /screenshot (add \"window\" for the front app). For OLD / earlier / saved screenshots (\"my old screenshot\", \"the screenshot from yesterday\"), list C:\\Users\\peter\\OneDrive\\Pictures\\Screenshots (files are named notch-yyyy-MM-dd-HHmmss.png — the timestamp IS the capture time), pick by date, and send the matching file via the <files> block.",
   "- remind:in 10m TEXT | remind:at 18:30 TEXT | remind:tomorrow 9am TEXT  → set a reminder; the user gets a ping in this chat when it's due. Use for \"remind me to …\", \"in 10 minutes tell me to …\". Time forms: in <n><s|m|h|d>, at <HH:MM> [am/pm], tomorrow <H:MM> [am/pm].",
   "- copy:TEXT  → put TEXT on the PC clipboard so the user can paste it on the desktop. Use for \"copy this to my clipboard\", \"copy the error\", \"put the key on my clipboard\".",
   "- clipboard:  → READ the PC clipboard (write nothing after the colon); the bridge sends its content back as a chat message. Use for \"what's in my clipboard\", \"what did I copy\", \"paste what I copied\".",
@@ -277,7 +277,7 @@ function extractActions(text) {
     clean = text.replace(block[0], "");
     for (const line of block[1].split(/\r?\n/)) {
       const s = line.trim().replace(/^[-*•]\s*/, "");
-      const m = s.match(/^(app|media|browser|file|focus|screenshot|remind|copy|clipboard)\s*:\s*(.*)$/i);
+      const m = s.match(/^(app|media|browser|file|focus|remind|copy|clipboard)\s*:\s*(.*)$/i);
       if (!m) continue;
       const value = m[2].trim().replace(/^["'`]|["'`]$/g, "");
       const type = m[1].toLowerCase();

@@ -265,9 +265,10 @@ const HELP = [
   "",
   "or just talk naturally:",
   "\"open notepad\" · \"play music\" · \"next song\"",
-  "\"open github.com\" · \"send me my latest screenshot\"",
+  "\"open github.com\" · \"send me my latest screenshot\" (old ones come back as files)",
   "",
-  "screenshots:  /screenshot  ·  /screenshot window  ·  /screenshot <app title>",
+  "screenshots:  /screenshot  ·  /screen  ·  /screenshot window  ·  /screenshot <app title>",
+  "(fresh captures ONLY via /screenshot — plain \"screenshot\" text just talks to the assistant)",
   "attachments:  send a photo/file in the chat — I'll read it (max 16MB); voice notes are transcribed and answered",
   "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
   "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
@@ -803,18 +804,15 @@ async function routeIncoming(raw, text, files) {
   }
 
   // /screenshot [window|screen|<app title>] — fresh capture sent to the chat.
-  // Only the direct form takes this fast path; longer natural phrasing falls
-  // through to the assistant (which can emit its own screenshot: action).
-  m = raw.match(/^\/\s*(?:screenshot|screen[\s-]?shot)\b\s*(.*)$/i)
-    || raw.match(/^(?:screenshot|screen[\s-]?shot)\b\s*(.*)$/i);
+  // SLASH-ONLY by user request: natural-language screenshot asks ("take a
+  // screenshot", "send my screenshot") sometimes get misunderstood by the
+  // model, so a fresh capture is ONLY ever triggered by /screenshot or
+  // /screen. Unslashed text falls through to the assistant, which handles
+  // old/saved screenshots via the Screenshots directory + <files>.
+  m = raw.match(/^\/\s*(?:screenshot|screen[\s-]?shot)\b\s*(.*)$/i);
   if (m) {
     const arg = m[1].trim();
-    const simple = !arg || /^(window|current window|screen|full|desktop|entire screen)$/i.test(arg)
-      || (arg.length <= 30 && !/\b(of|my|the|send|and|with|for)\b/i.test(arg));
-    const slashed = /^\/\s*(?:screenshot|screen[\s-]?shot)/i.test(raw);
-    if (slashed || simple) {
-      return enqueue("screenshot", () => takeScreenshot(arg));
-    }
+    return enqueue("screenshot", () => takeScreenshot(arg));
   }
 
   // reminders: "remind in 10m X" / "remind at 18:30 X" / "reminders" / "cancel 3"
@@ -998,11 +996,6 @@ async function askAssistant(text, depth = 0, files = null) {
   const actions = res.actions || [];
   if (!res.reply && actions.length) await wa.send("✅ done");
   for (const a of actions) {
-    if (String(a.type).toLowerCase() === "screenshot") {
-      // Screenshot is async: capture, then push the PNG into the chat.
-      await takeScreenshot(a.value);
-      continue;
-    }
     if (String(a.type).toLowerCase() === "remind") {
       // #3 — assistant-parsed reminder: "remind:in 10m drink water".
       const w = parseWhen(String(a.value));
