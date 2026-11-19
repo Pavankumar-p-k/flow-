@@ -156,6 +156,7 @@ const HELP = [
   "repos — all git repos + branch/dirty",
   "sessions — active sessions",
   "prompts — pending approvals",
+  "reminders — list pending reminders",
   "help — this message",
   "",
   "messages run one at a time, in order (queued if busy)",
@@ -165,11 +166,88 @@ const HELP = [
   "\"open github.com\" · \"send me my latest screenshot\"",
   "",
   "screenshots:  /screenshot  ·  /screenshot window  ·  /screenshot <app title>",
+  "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
   "system:  \"how many tabs are open\" · \"what app is in front\"",
   "",
   "to answer a prompt:  allow / always / reject",
   "or numbered:  2 allow · 1 reject · 1: your answer",
 ].join("\n");
+
+/* ---------- reminders (#3) ----------
+   Parsed "when" + text, persisted to reminders.json, fired by a 10s pump.
+   Survives restarts (missed ones fire late, not lost). */
+
+const REMINDERS_FILE = path.join(__dirname, "reminders.json");
+let reminders = [];
+try { reminders = JSON.parse(fs.readFileSync(REMINDERS_FILE, "utf8")) || []; } catch {}
+
+function saveReminders() {
+  try { fs.writeFileSync(REMINDERS_FILE, JSON.stringify(reminders)); } catch {}
+}
+
+/* "in 10m ..." | "at 18:30 ..." | "tomorrow 9am ..." -> {at, rest} or null. */
+function parseWhen(s) {
+  const now = Date.now();
+  let m = s.match(/^in\s+(\d+)\s*(s|sec|secs|second|seconds|m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)\b\s*/i);
+  if (m) {
+    const n = Number(m[1]);
+    const u = m[2].toLowerCase();
+    const mult = /^(s|sec)/.test(u) ? 1000 : /^(m|min)/.test(u) ? 60000 : /^(h|hr)/.test(u) ? 3600000 : 86400000;
+    return { at: now + n * mult, rest: s.slice(m[0].length).trim() };
+  }
+  m = s.match(/^at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b\s*/i);
+  if (m) {
+    let h = Number(m[1]);
+    const min = m[2] ? Number(m[2]) : 0;
+    const ap = (m[3] || "").toLowerCase();
+    if (ap === "pm" && h < 12) h += 12;
+    if (ap === "am" && h === 12) h = 0;
+    const d = new Date();
+    d.setHours(h, min, 0, 0);
+    if (d.getTime() <= now) d.setDate(d.getDate() + 1); // already past -> tomorrow
+    return { at: d.getTime(), rest: s.slice(m[0].length).trim() };
+  }
+  m = s.match(/^tomorrow\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b\s*/i);
+  if (m) {
+    let h = Number(m[1]);
+    const min = m[2] ? Number(m[2]) : 0;
+    const ap = (m[3] || "").toLowerCase();
+    if (ap === "pm" && h < 12) h += 12;
+    if (ap === "am" && h === 12) h = 0;
+    const d = new Date();
+    d.setDate(d.getDate() + 1);
+    d.setHours(h, min, 0, 0);
+    return { at: d.getTime(), rest: s.slice(m[0].length).trim() };
+  }
+  return null;
+}
+
+function fmtWhen(at) {
+  const d = new Date(at);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  const hm = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return sameDay ? hm : d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " + hm;
+}
+
+function addReminder(at, text) {
+  const id = reminders.reduce((mx, r) => Math.max(mx, r.id || 0), 0) + 1;
+  reminders.push({ id, at, text, created: Date.now() });
+  saveReminders();
+  return id;
+}
+
+function pumpReminders() {
+  if (!wa) return;
+  const now = Date.now();
+  const due = reminders.filter((r) => r.at <= now);
+  if (!due.length) return;
+  reminders = reminders.filter((r) => r.at > now);
+  saveReminders();
+  for (const r of due.sort((a, b) => a.at - b.at)) {
+    log("reminder fired #" + r.id + " " + String(r.text).slice(0, 50));
+    wa.send("⏰ reminder: " + r.text);
+  }
+}
 
 /* ---------- unified FIFO task queue ----------
    Every incoming message becomes a task. Tasks run strictly one at a time
@@ -188,6 +266,7 @@ let pendingRaw = [];
 try { pendingRaw = JSON.parse(fs.readFileSync(PENDING_FILE, "utf8")) || []; } catch {}
 let curRaw = null;     // message text being routed right now (enqueue reads it)
 let restoring = false; // suppress "queued #" chatter while replaying
+let remindTimer = null; // #3 reminder pump
 let lastMsg = { text: "", at: 0 }; // #17 duplicate-tap guard
 
 /* #14 — assistant rate cap: this hour's turn timestamps (assistant.ask only;
@@ -333,6 +412,43 @@ async function routeIncoming(raw, text) {
     }
   }
 
+  // reminders: "remind in 10m X" / "remind at 18:30 X" / "reminders" / "cancel 3"
+  m = raw.match(/^\/?\s*remind(?:er)?s?\b\s*(.*)$/i);
+  if (m) {
+    const arg = m[1].trim();
+    if (!arg || /^(list|show)$/i.test(arg)) {
+      return enqueue("reminders", () => {
+        if (!reminders.length) return wa.send("✅ no pending reminders.");
+        const lines = [...reminders].sort((a, b) => a.at - b.at).map((r) =>
+          "#" + r.id + " · " + fmtWhen(r.at) + " · " + r.text);
+        return wa.send("⏰ REMINDERS (" + reminders.length + "):\n" + lines.join("\n") + "\n\ncancel <n> to remove one");
+      });
+    }
+    const w = parseWhen(arg);
+    if (w && w.rest) {
+      const text = w.rest.replace(/^to\s+/i, "");
+      return enqueue("remind", () => {
+        const id = addReminder(w.at, text);
+        log("reminder set #" + id + " for " + new Date(w.at).toISOString() + " " + text.slice(0, 50));
+        return wa.send("⏰ reminder #" + id + " set for " + fmtWhen(w.at) + ": " + text);
+      });
+    }
+    // "remind ..." with no recognizable time -> let the assistant parse it
+    // ("remind me to drink water when I'm free" style falls through).
+  }
+  m = raw.match(/^\/?\s*cancel\s+(?:reminder\s+)?#?(\d+)$/i);
+  if (m) {
+    const id = Number(m[1]);
+    return enqueue("cancel reminder", () => {
+      const i = reminders.findIndex((r) => r.id === id);
+      if (i < 0) return wa.send("⚠️ no reminder #" + id + ".");
+      const r = reminders[i];
+      reminders.splice(i, 1);
+      saveReminders();
+      return wa.send("🗑 cancelled #" + id + ": " + r.text);
+    });
+  }
+
   switch (low) {
     case "help":
     case "commands":
@@ -395,6 +511,19 @@ async function askAssistant(text, depth = 0) {
     if (String(a.type).toLowerCase() === "screenshot") {
       // Screenshot is async: capture, then push the PNG into the chat.
       await takeScreenshot(a.value);
+      continue;
+    }
+    if (String(a.type).toLowerCase() === "remind") {
+      // #3 — assistant-parsed reminder: "remind:in 10m drink water".
+      const w = parseWhen(String(a.value));
+      if (w && w.rest) {
+        const text = w.rest.replace(/^to\s+/i, "");
+        const id = addReminder(w.at, text);
+        log("reminder set (assistant) #" + id + " " + new Date(w.at).toISOString());
+        await wa.send("⏰ reminder #" + id + " set for " + fmtWhen(w.at) + ": " + text);
+      } else {
+        await wa.send("⚠️ couldn't read that reminder time — try: remind in 10m <text>");
+      }
       continue;
     }
     const ok = runAction(a);
@@ -723,6 +852,11 @@ async function start(deps) {
   if (running) return;
   running = true;
 
+  // #3 — reminders: fire anything that came due while we were down, then pump.
+  pumpReminders();
+  if (remindTimer) clearInterval(remindTimer);
+  remindTimer = setInterval(pumpReminders, 10000);
+
   // #10 — replay messages that were queued when the app last died.
   if (pendingRaw.length) {
     const leftover = pendingRaw.slice();
@@ -770,7 +904,8 @@ async function start(deps) {
 
 function stop() {
   running = false;
+  if (remindTimer) { clearInterval(remindTimer); remindTimer = null; }
   try { if (abort) abort.abort(); } catch {}
 }
 
-module.exports = { start, stop, handleIncoming, pending, pushPending, runAction };
+module.exports = { start, stop, handleIncoming, pending, pushPending, runAction, parseWhen };
