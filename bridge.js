@@ -271,6 +271,7 @@ const HELP = [
   "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
   "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
   "control:  stop / stop current  ·  skip   (preempt what's running NOW)",
+  "queue — show running/waiting tasks  ·  clear — drop the waiting ones",
   "clipboard:  copy <text>  ·  clipboard / paste  (read it back)",
   "digest — daily summary (auto 09:00 · digest at 18:00 to reschedule)",
   "system:  \"how many tabs are open\" · \"what app is in front\"",
@@ -448,6 +449,7 @@ const taskQueue = [];
 let taskRunning = false;
 const QUEUE_MAX = 8;
 let skipRequested = false; // #9 — "skip": in-flight assistant turn drops its reply
+let currentTask = null;    // {label, at} while a task is executing (queue cmd)
 
 /* #10 — pending tasks survive a crash/restart: every routed message text is
    written to queue-pending.json and removed when its task finishes; on boot
@@ -484,7 +486,7 @@ function enqueue(label, fn) {
     return;
   }
   const waiting = taskRunning || taskQueue.length > 0;
-  taskQueue.push({ label, fn, raw: curRaw });
+  taskQueue.push({ label, fn, raw: curRaw, at: Date.now() });
   if (curRaw) { pendingRaw.push(curRaw); savePending(); }
   if (waiting && !restoring) {
     log("queue +" + taskQueue.length + " " + label);
@@ -507,6 +509,7 @@ async function drainQueue() {
     while (taskQueue.length) {
       const t = taskQueue.shift();
       skipRequested = false; // fresh task — a stale skip must not mute it
+      currentTask = { label: t.label, at: Date.now() };
       log("queue run " + t.label);
       try {
         await t.fn();
@@ -515,11 +518,49 @@ async function drainQueue() {
         try { await wa.send("⚠️ failed: " + t.label); } catch {}
       } finally {
         finishTask(t);
+        currentTask = null;
       }
     }
   } finally {
     taskRunning = false;
   }
+}
+
+/* ---------- queue visibility + management (#10 tier-1) ----------
+   "queue" must answer NOW (a status check queued behind a long task would
+   arrive too late to be useful), so both commands sit with the other
+   control signals and bypass the FIFO. */
+
+function fmtAge(at) {
+  const s = Math.max(0, Math.floor((Date.now() - at) / 1000));
+  return s < 60 ? s + "s" : Math.floor(s / 60) + "m " + (s % 60) + "s";
+}
+
+function fmtQueue() {
+  const lines = ["🧾 TASK QUEUE"];
+  lines.push(currentTask
+    ? "▶ running: " + currentTask.label + " (" + fmtAge(currentTask.at) + ")"
+    : "▶ nothing running");
+  if (taskQueue.length) {
+    lines.push("⏳ waiting (" + taskQueue.length + "):");
+    taskQueue.forEach((t, i) => lines.push("  " + (i + 1) + ". " + t.label + " (" + fmtAge(t.at || Date.now()) + ")"));
+  } else {
+    lines.push("⏳ queue empty");
+  }
+  lines.push("", "clear drops waiting · skip stops current");
+  return lines.join("\n");
+}
+
+function clearQueue() {
+  if (!taskQueue.length) {
+    return wa.send("✅ queue is already empty" + (currentTask ? " (current task keeps running)" : "") + ".");
+  }
+  const n = taskQueue.length;
+  for (const t of taskQueue) finishTask(t); // also drop their raws from queue-pending.json
+  taskQueue.length = 0;
+  log("queue cleared " + n + " waiting task(s)");
+  return wa.send("🗑 cleared " + n + " waiting task(s)" +
+    (currentTask ? " — current keeps running (skip to stop it)" : "") + ".");
 }
 
 /* ---------- incoming WhatsApp messages ---------- */
@@ -558,6 +599,9 @@ async function routeIncoming(raw, text) {
   // "stop <n>" stays in the queue path below (targeted, not preemptive).
   if (/^\/?\s*(?:stop|halt)(?:\s+(?:current|now|this))?\s*$/i.test(raw)) return stopCurrent();
   if (/^\/?\s*skip\s*$/i.test(raw)) return skipCurrent();
+  // queue observability/management — also immediate (see fmtQueue).
+  if (/^\/?\s*queue\s*$/i.test(raw)) return wa.send(fmtQueue());
+  if (/^\/?\s*clear(?:\s+queue)?\s*$/i.test(raw)) return clearQueue();
 
   // numbered: "<n> allow|always|reject>" — re-resolved when it actually runs,
   // so a prompt answered or cancelled while queued reports accurately.
