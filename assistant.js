@@ -6,6 +6,13 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { runPs } = require("./psrun");
+const sheettext = require("./sheettext");
+
+// formats whose bytes are a ZIP/XML container (or plain text) — extract to
+// text before prompting; everything else (images, pdf…) stays a attachment.
+function sheetExt(ext) {
+  return [".xlsx", ".xlsm", ".docx", ".pptx", ".csv", ".tsv", ".txt", ".md", ".json", ".log"].includes(ext);
+}
 
 const SERVICE_FILE = path.join(os.homedir(), ".local", "state", "opencode", "service.json");
 const STATE_FILE = path.join(__dirname, "assistant.json");
@@ -44,7 +51,7 @@ const PROTOCOL = [
   "<files>",
   "C:\\full\\path\\to\\file.ext",
   "</files>",
-  "INBOUND FILES — the user may attach a photo or document to their message; it arrives as a file on this turn. Examine it (vision/Read) before answering. With no caption, the text is just \"what is in this image?\" / \"what is in this document?\" — answer from the attachment itself. If you cannot read it, say so plainly instead of guessing.",
+  "INBOUND FILES — the user may attach a photo or document to their message; it arrives as a file on this turn. Images arrive as vision attachments; spreadsheets/documents arrive ALREADY EXTRACTED as plain text in the prompt (see \"CONTENT OF\" / \"[Sheet:\" markers) — answer from that text. Examine attachments before answering. With no caption, the text is just \"what is in this image?\" / \"what is in this document?\" — answer from the attachment itself. If you cannot read it, say so plainly instead of guessing.",
   "Leave the block out entirely when there is nothing to send. Never invent a path.",
   "",
   "ACTIONS — to make the PC do things, put action lines in this block at the very end of your reply:",
@@ -332,7 +339,8 @@ async function askOnce(userText, retried, inFiles) {
     // inlines them as base64 from a file:/// URI — a plain path is a 400.
     // (Parameter is `inFiles`: this try block declares its own `files` later
     // via extractFiles — same name would be a TDZ error.)
-    const body = { text: prompt };
+    let text = prompt;
+    const body = { text };
     if (inFiles && inFiles.length) {
       const atts = [];
       for (const f of inFiles) {
@@ -340,12 +348,28 @@ async function askOnce(userText, retried, inFiles) {
           const p = String(f);
           if (!fs.existsSync(p)) continue;
           if (fs.statSync(p).size > MAX_FILE_BYTES) continue;
+          // #7-fix — spreadsheets/documents are BINARY zips: the model can't
+          // read them from a base64 attachment (it answered from chat context
+          // instead of the sheet). Extract cells/paragraphs to text and put
+          // THAT in the prompt; images keep going as vision attachments.
+          const ext = path.extname(p).toLowerCase();
+          if (sheetExt(ext)) {
+            const ex = sheettext.extract(p);
+            if (ex.ok) {
+              text += "\n\nCONTENT OF " + path.basename(p) + ":" + ex.text;
+              log("extracted " + ext + " " + path.basename(p) + " -> " + ex.text.length + " chars");
+              continue;
+            }
+            // extraction failed — fall through and attach the binary anyway
+            log("extract failed " + path.basename(p) + ": " + ex.error);
+          }
           atts.push({
             uri: /^file:\/\//i.test(p) ? p : "file:///" + p.replace(/\\/g, "/"),
             name: path.basename(p),
           });
         } catch {}
       }
+      body.text = text;
       if (atts.length) {
         body.files = atts;
         log("attaching " + atts.length + " file(s): " + atts.map((a) => a.name).join(", "));

@@ -268,7 +268,7 @@ const HELP = [
   "\"open github.com\" · \"send me my latest screenshot\"",
   "",
   "screenshots:  /screenshot  ·  /screenshot window  ·  /screenshot <app title>",
-  "attachments:  send a photo/file in the chat — I'll read it (max 16MB)",
+  "attachments:  send a photo/file in the chat — I'll read it (max 16MB); voice notes are transcribed and answered",
   "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
   "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
   "control:  stop / stop current  ·  skip   (preempt what's running NOW)",

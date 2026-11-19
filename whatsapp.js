@@ -14,9 +14,13 @@ const MAX_INBOX_BYTES = 16 * 1024 * 1024;
 // baileys' media downloader — bound inside connect() from the dynamic import;
 // tests inject their own via _setDownloader.
 let downloader = null;
+// #7 — voice-note transcriber (scripts/transcribe.py); tests inject fakes
+// via _setTranscriber so no Python runs in unit tests.
+let transcriber = null;
 
 /* #8 — classify an inbound media message. Returns null for anything we don't
-   ingest (audio is #7, video/sticker unsupported). */
+   ingest (video/sticker unsupported). #7: voice notes (audioMessage ptt) are
+   downloaded then transcribed to text before the assistant sees them. */
 function pickMedia(message) {
   if (!message) return null;
   const img = message.imageMessage;
@@ -37,6 +41,18 @@ function pickMedia(message) {
       name: doc.fileName || "",
     };
   }
+  const aud = message.audioMessage;
+  if (aud && (aud.ptt || (aud.mimetype || "").includes("ogg"))) {
+    // ptt = WhatsApp voice note (push-to-talk). Plain audio files sent as
+    // documents stay on the document path; short clips are voice notes.
+    return {
+      kind: "voice",
+      mime: aud.mimetype || "audio/ogg; codecs=opus",
+      size: Number(aud.fileLength) || 0,
+      name: aud.fileName || "",
+      seconds: Number(aud.seconds) || 0,
+    };
+  }
   return null;
 }
 
@@ -45,6 +61,7 @@ const EXT_FOR_MIME = {
   "image/gif": ".gif", "image/bmp": ".bmp", "application/pdf": ".pdf",
   "text/plain": ".txt", "text/markdown": ".md", "application/json": ".json",
   "application/zip": ".zip", "text/csv": ".csv",
+  "audio/ogg": ".opus", "audio/opus": ".opus",
 };
 
 /* Write a downloaded blob into chat-inbox/ as <ts>_<name>. The name is
@@ -97,6 +114,39 @@ function syntheticText(media) {
   return media.kind === "image" ? "what is in this image?" : "what is in this document?";
 }
 
+/* #7 — voice note -> text via scripts/transcribe.py (faster-whisper,
+   large-v3-turbo, Telugu/English auto-detect). Returns "" on failure so the
+   caller can fall back to a user-facing note instead of an empty ask.
+   The model loads on first call (~seconds), then stays warm per process. */
+function transcribe(audioPath) {
+  return new Promise((resolve) => {
+    const py = process.env.VOICE_PYTHON || "python";
+    const child = require("child_process").spawn(
+      py, [path.join(__dirname, "scripts", "transcribe.py"), audioPath],
+      { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let out = "", err = "";
+    const killer = setTimeout(() => { try { child.kill(); } catch {} }, 90000);
+    child.stdout.on("data", (d) => { out += d; });
+    child.stderr.on("data", (d) => { err += d; });
+    child.on("close", (code) => {
+      clearTimeout(killer);
+      try {
+        const line = out.trim().split("\n").pop() || "";
+        const j = JSON.parse(line);
+        if (j.error) { log("transcribe error: " + j.error); resolve(""); return; }
+        log("transcribed " + path.basename(audioPath) + " (" + (j.duration || "?") + "s, " +
+          (j.language || "?") + "): " + JSON.stringify((j.text || "").slice(0, 60)));
+        resolve((j.text || "").trim());
+      } catch (e) {
+        log("transcribe failed code=" + code + " " + String(err).slice(0, 120));
+        resolve("");
+      }
+    });
+    child.on("error", (e) => { clearTimeout(killer); log("transcribe spawn: " + e.message); resolve(""); });
+  });
+}
+
 /* Per-message pipeline, extracted so tests can drive it without a socket.
    `type` gates media download: "notify" = fresh phone message, "append" =
    history sync / our own echoes — those are never downloaded. */
@@ -135,6 +185,7 @@ async function processMessage(m, type) {
   if (!isSelfChatJid(jid)) return;
 
   let files = [];
+  let voiceText = "";
   if (media) {
     const ing = await ingestMedia(m, media);
     files = ing.files;
@@ -142,9 +193,19 @@ async function processMessage(m, type) {
     if (!files.length) {
       if (ing.note) send(ing.note);
       if (!text.trim()) return;
+    } else if (media.kind === "voice") {
+      // #7 — voice notes are transcribed locally; the assistant only ever
+      // sees the transcript (audio bytes never reach the prompt API).
+      voiceText = await (transcriber || transcribe)(files[0]);
+      try { fs.unlinkSync(files[0]); } catch {}  // .opus has no other use
+      files = [];
+      if (!voiceText.trim()) {
+        send("🎧 I couldn't transcribe that voice note — try sending it as text.");
+        return;
+      }
     }
   }
-  const body = text.trim() || (files.length ? syntheticText(media) : "");
+  const body = voiceText || text.trim() || (files.length ? syntheticText(media) : "");
   if (!body) return;
   if (handlers.onMessage) handlers.onMessage(body, files);
 }
@@ -477,6 +538,9 @@ module.exports = {
   _saveInbox: saveInbox,
   _processMessage: processMessage,
   _setDownloader: (fn) => { downloader = fn; },
+  // #7 — voice: tests inject a fake transcriber instead of running Python
+  _transcribe: transcribe,
+  _setTranscriber: (fn) => { transcriber = fn; },
   _sentIds: sentIds,
   _outbox: outbox,
   _rememberSelfJid: rememberSelfJid,

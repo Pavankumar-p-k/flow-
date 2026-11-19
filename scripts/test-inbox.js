@@ -93,7 +93,8 @@ const outboxBase = () => wa._outbox.length;
   const pm2 = wa._pickMedia(DOC.message);
   t("pickMedia document keeps fileName", pm2 && pm2.kind === "document" && pm2.name === "report.pdf", JSON.stringify(pm2));
   t("pickMedia plain text -> null", wa._pickMedia(PLAIN.message) === null);
-  t("pickMedia audio -> null (item 7 scope)", wa._pickMedia(AUDIO.message) === null);
+  // item 7 landed: ptt audio now classifies as voice (transcribed, not attached)
+  t("pickMedia audio -> voice (item 7)", wa._pickMedia(AUDIO.message)?.kind === "voice");
 
   // -- saveInbox sanitization
   const evil = wa._saveInbox(Buffer.from("x"), "../../evil.png");
