@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>region</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; cursor: crosshair;
+    user-select: none; -webkit-user-select: none; background: transparent;
+    font: 700 13px/1.4 Consolas, monospace; color: #fff; }
+  #dim { position: absolute; inset: 0; background: rgba(0, 0, 0, .25); }
+  #sel { position: absolute; display: none; box-sizing: border-box;
+    border: 2px solid #fff; background: rgba(255, 255, 255, .12);
+    box-shadow: 0 0 0 9999px rgba(0, 0, 0, .35); }
+  #hint { position: absolute; left: 50%; bottom: 8%; transform: translateX(-50%);
+    background: rgba(0, 0, 0, .8); border: 1px solid rgba(255,255,255,.3);
+    border-radius: 8px; padding: 8px 16px; letter-spacing: .04em; }
+  #size { position: absolute; display: none; background: rgba(0, 0, 0, .85);
+    border-radius: 4px; padding: 3px 7px; pointer-events: none; white-space: nowrap; }
+</style>
+</head>
+<body>
+  <div id="dim"></div>
+  <div id="sel"></div>
+  <div id="size"></div>
+  <div id="hint">drag to select a region &nbsp;·&nbsp; Esc cancels</div>
+<script>
+  const sel = document.getElementById("sel");
+  const size = document.getElementById("size");
+  let sx = 0, sy = 0, dragging = false;
+
+  function upd(cx, cy) {
+    const x = Math.min(sx, cx), y = Math.min(sy, cy);
+    const w = Math.abs(cx - sx), h = Math.abs(cy - sy);
+    sel.style.display = "block";
+    sel.style.left = x + "px"; sel.style.top = y + "px";
+    sel.style.width = w + "px"; sel.style.height = h + "px";
+    size.style.display = "block";
+    size.style.left = (x + w + 8) + "px"; size.style.top = (y + h + 8) + "px";
+    size.textContent = w + " × " + h;
+  }
+
+  document.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    dragging = true; sx = e.clientX; sy = e.clientY;
+    document.getElementById("hint").style.display = "none";
+    upd(e.clientX, e.clientY);
+  });
+  document.addEventListener("mousemove", (e) => { if (dragging) upd(e.clientX, e.clientY); });
+  document.addEventListener("mouseup", (e) => {
+    if (!dragging) return;
+    dragging = false;
+    const x = Math.round(Math.min(sx, e.clientX));
+    const y = Math.round(Math.min(sy, e.clientY));
+    const w = Math.round(Math.abs(e.clientX - sx));
+    const h = Math.round(Math.abs(e.clientY - sy));
+    if (w < 8 || h < 8) { window.notch.regionCancel(); return; }  // stray click = cancel
+    window.notch.regionSelected({ x, y, w, h });
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") window.notch.regionCancel(); });
+</script>
+</body>
+</html>

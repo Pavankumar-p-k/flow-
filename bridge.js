@@ -127,6 +127,7 @@ function resolveSession(n) {
    main process; injecting keeps this module testable in plain node). */
 
 let clip = null;
+let regionFn = null;   // (mode, cb) => void — main.js region drag-select
 
 async function copyToClipboard(text) {
   if (!clip) return "⚠️ clipboard unavailable.";
@@ -269,6 +270,8 @@ const HELP = [
   "",
   "screenshots:  /screenshot  ·  /screen  ·  /screenshot window  ·  /screenshot <app title>",
   "(fresh captures ONLY via /screenshot — plain \"screenshot\" text just talks to the assistant)",
+  "region:  /screenshot region — drag-select a piece of the screen",
+  "ocr:  /ocr (drag-select text)  ·  /ocr full (read the whole screen)",
   "attachments:  send a photo/file in the chat — I'll read it (max 16MB); voice notes are transcribed and answered",
   "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
   "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
@@ -812,7 +815,20 @@ async function routeIncoming(raw, text, files) {
   m = raw.match(/^\/\s*(?:screenshot|screen[\s-]?shot)\b\s*(.*)$/i);
   if (m) {
     const arg = m[1].trim();
+    // /screenshot region|selection|area|select — drag-select a region.
+    if (/^(region|selection|sel|area|select)$/i.test(arg)) {
+      return enqueue("region shot", () => runRegion("shot"));
+    }
     return enqueue("screenshot", () => takeScreenshot(arg));
+  }
+
+  // /ocr [region] — drag-select text, OCR it locally (Windows.Media.Ocr).
+  // /ocr full|screen|all — OCR the whole current screen with no selection.
+  m = raw.match(/^\/\s*ocr\b\s*(.*)$/i);
+  if (m) {
+    const arg = m[1].trim();
+    const mode = /^(full|screen|all|desktop)$/i.test(arg) ? "ocrfull" : "ocr";
+    return enqueue("ocr", () => runRegion(mode));
   }
 
   // reminders: "remind in 10m X" / "remind at 18:30 X" / "reminders" / "cancel 3"
@@ -1070,6 +1086,53 @@ async function takeScreenshot(value) {
   }
   await wa.sendFile(file, path.basename(file));
   log("screenshot sent: " + file);
+}
+
+/* Region capture + OCR: hand the mode to main.js (it pre-captures the
+   screen, opens the drag selector, crops / OCRs) and push the result into
+   the chat. mode: "shot" | "ocr" (select) | "ocrfull" (whole screen). */
+function runRegion(mode) {
+  return new Promise((resolve) => {
+    if (!regionFn) { resolve(wa.send("⚠️ region capture is not available in this build.")); return; }
+    wa.send(mode === "shot" ? "✂️ drag to select a region…" : mode === "ocr" ? "📄 drag to select text…" : "📄 reading the whole screen…");
+    let done = false;
+    let guard = null;
+    const finish = async (err, out) => {
+      if (done) return;
+      done = true;
+      if (guard) clearTimeout(guard);
+      try {
+        if (err === "cancelled") return resolve(await wa.send("↩️ selection cancelled"));
+        if (err) return resolve(await wa.send("⚠️ " + err));
+        if (out && out.kind === "shot" && out.path) {
+          await wa.sendFile(out.path, path.basename(out.path));
+          log("region shot sent: " + out.path);
+          return resolve();
+        }
+        if (out && out.kind === "ocr") {
+          const t = String(out.text || "").trim();
+          if (!t) return resolve(await wa.send("📄 no text found in that region."));
+          return resolve(await wa.send("📄 OCR (" + (out.lang || "?") + "):\n" + t));
+        }
+        resolve();
+      } catch (e) {
+        log("region send err " + e.message);
+        resolve();
+      }
+    };
+    try {
+      regionFn(mode, finish);
+    } catch (e) {
+      done = true;
+      resolve(wa.send("⚠️ region capture failed: " + e.message));
+    }
+    // Safety: never let a forgotten selection wedge the FIFO queue.
+    if (!done) guard = setTimeout(() => {
+      if (done) return;
+      done = true;
+      resolve(wa.send("⚠️ selection timed out — try /screenshot region again."));
+    }, 120000);
+  });
 }
 
 function runAction(a) {
@@ -1345,6 +1408,7 @@ async function start(deps) {
   getState = deps.getState;
   onEvent = deps.onEvent;
   clip = deps.clipboard || null; // #7 — electron clipboard (optional in tests)
+  regionFn = deps.region || null; // /screenshot region + /ocr drag-select (main.js)
   if (running) return;
   running = true;
 

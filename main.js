@@ -14,6 +14,7 @@ const CONFIG_FILE = path.join(APP_DIR, "config.json");
 
 const wa = require("./whatsapp");
 const bridge = require("./bridge");
+const { runPs } = require("./psrun");
 const INTRO = require("./intro/intro.config");   // one config: clips + timings
 
 // Dexter's nub is 96x28 r12; the window adds room for the shoulder flares
@@ -362,6 +363,101 @@ ipcMain.on("media", (_e, action) => {
     stdio: "ignore",
   });
 });
+
+/* ---------- region capture + OCR ----------
+   /screenshot region and /ocr show a full-screen drag selector. The screen
+   is captured FIRST (before the overlay exists, so the dim/selection never
+   lands in the pixels), then scripts/crop.ps1 crops the selection out of
+   that capture; /ocr pipes the crop through Windows.Media.Ocr (local). */
+
+let regionWin = null;
+let regionState = null;   // { mode, pre, origin, cb }
+
+function endRegion(err, out) {
+  const st = regionState;
+  regionState = null;
+  if (regionWin && !regionWin.isDestroyed()) { try { regionWin.destroy(); } catch {} }
+  regionWin = null;
+  if (st && typeof st.cb === "function") {
+    try { st.cb(err, out); } catch (e) { ilog("REGION cb err " + e.message); }
+  }
+}
+
+async function startRegionCapture(mode, cb) {
+  if (regionState) { cb("⚠️ a selection is already open", null); return; }
+  regionState = { mode, pre: "", origin: { x: 0, y: 0 }, cb };
+  ilog("REGION start mode=" + mode);
+  try {
+    const pre = await runPs(path.join(APP_DIR, "scripts", "screenshot.ps1"),
+      ["-Target", "screen"], { timeoutMs: 20000, tries: 3 });
+    const file = (String(pre).split(/\r?\n/).map((s) => s.trim()).filter(Boolean).pop()) || "";
+    if (!regionState) return;                     // cancelled during capture
+    if (!file || !fs.existsSync(file)) { endRegion("capture failed", null); return; }
+    regionState.pre = file;
+
+    if (mode === "ocrfull") { await finishRegion(null); return; }   // no overlay needed
+
+    const display = screen.getPrimaryDisplay();
+    const db = display.bounds;
+    regionState.origin = { x: db.x, y: db.y };
+    regionWin = new BrowserWindow({
+      x: db.x, y: db.y, width: db.width, height: db.height,          // full screen, DIP coords
+      title: "agent-notch-region",
+      frame: false, transparent: true, resizable: false, movable: false,
+      skipTaskbar: true, alwaysOnTop: true, hasShadow: false,
+      focusable: true, show: false, backgroundColor: "#00000000",
+      webPreferences: {
+        preload: path.join(__dirname, "preload.js"),
+        contextIsolation: true, nodeIntegration: false, backgroundThrottling: false,
+      },
+    });
+    regionWin.setAlwaysOnTop(true, "screen-saver");
+    regionWin.loadFile(path.join(__dirname, "region", "region.html"), { query: { mode } });
+    regionWin.once("ready-to-show", () => {
+      if (regionWin && !regionWin.isDestroyed()) { regionWin.show(); regionWin.focus(); }
+    });
+    regionWin.on("closed", () => {
+      regionWin = null;
+      if (regionState) endRegion("cancelled", null);   // window closed early
+    });
+  } catch (e) {
+    endRegion(e.message, null);
+  }
+}
+
+/* Crop the selection (unless whole-screen OCR), OCR when asked, hand back
+   { kind: "shot" | "ocr" } to the bridge, which pushes it into the chat. */
+async function finishRegion(r) {
+  const st = regionState;
+  if (!st) return;
+  let out = st.pre;
+  if (st.mode !== "ocrfull") {
+    out = path.join(APP_DIR, "chat-inbox", Date.now() + "_region.png");
+    const args = [st.pre, String(r.x), String(r.y), String(r.w), String(r.h), out];
+    await runPs(path.join(APP_DIR, "scripts", "crop.ps1"), args, { timeoutMs: 10000 });
+    if (!fs.existsSync(out)) { endRegion("crop failed", null); return; }
+  }
+  if (st.mode === "shot") { endRegion(null, { kind: "shot", path: out }); return; }
+  const raw = await runPs(path.join(APP_DIR, "scripts", "ocr.ps1"), [out], { timeoutMs: 30000 });
+  let j = null;
+  try { j = JSON.parse(String(raw).split(/\r?\n/).map((s) => s.trim()).filter(Boolean).pop() || ""); } catch {}
+  if (!j || j.error) { endRegion("OCR failed" + (j && j.error ? ": " + j.error : ""), null); return; }
+  endRegion(null, { kind: "ocr", text: j.text || "", lang: j.lang || "" });
+}
+
+ipcMain.on("region-selected", (_e, r) => {
+  if (!regionState) return;
+  const o = regionState.origin;
+  const rr = r || {};
+  const x = Math.round(Number(rr.x) || 0) + o.x;    // client -> screen DIP
+  const y = Math.round(Number(rr.y) || 0) + o.y;
+  const w = Math.round(Number(rr.w) || 0);
+  const h = Math.round(Number(rr.h) || 0);
+  if (w < 8 || h < 8) { endRegion("cancelled", null); return; }
+  finishRegion({ x, y, w, h }).catch((e) => endRegion(e.message, null));
+});
+
+ipcMain.on("region-cancel", () => endRegion("cancelled", null));
 
 /* ---------- IPC from renderer ---------- */
 
@@ -905,6 +1001,7 @@ app.whenReady().then(async () => {
       whatsapp: wa,
       getState: () => lastState,
       clipboard, // #7 — clipboard actions from chat
+      region: startRegionCapture, // /screenshot region + /ocr drag-select
       onEvent: (e) => {
         if (win && !win.isDestroyed()) win.webContents.send("wa-event", e);
       },
@@ -929,6 +1026,8 @@ app.on("before-quit", () => {
   try { fs.unlinkSync(INTRO_FLAG); } catch {}
   try { globalShortcut.unregisterAll(); } catch {}
   if (introWin && !introWin.isDestroyed()) { try { introWin.destroy(); } catch {} introWin = null; }
+  if (regionWin && !regionWin.isDestroyed()) { try { regionWin.destroy(); } catch {} regionWin = null; }
+  regionState = null;
   try { bridge.stop(); } catch {}
   try { wa.disconnect(); } catch {}
 });
