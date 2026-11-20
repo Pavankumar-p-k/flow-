@@ -22,10 +22,12 @@ function restoreAll() {
   } catch {}
 }
 
-// strip weatherCity so the IP-fallback test sees "no city configured"
+// strip weatherCity + cached coords so the IP-fallback test sees
+// "no city configured" (both restored at the end)
 try {
   const c = origCfg != null ? JSON.parse(origCfg) : {};
   delete c.weatherCity;
+  delete c.weatherLoc;
   fs.writeFileSync(CFG, JSON.stringify(c, null, 2));
 } catch {}
 // suppress the boot catch-up digest pump (same trick as test-digest)

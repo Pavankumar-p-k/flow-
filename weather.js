@@ -49,7 +49,9 @@ async function getJson(url, ms = 8000, retries = 1) {
   const ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timer = ctl ? setTimeout(() => { try { ctl.abort(); } catch {} }, ms) : null;
   try {
-    const r = await fetch(url, ctl ? { signal: ctl.signal } : {});
+    // ipapi.co burst-limits requests carrying Node's default "undici" UA —
+    // a plain UA sails through (verified: no-UA 429, custom UA 200).
+    const r = await fetch(url, { headers: { "User-Agent": "agent-notch/1.0" }, ...(ctl ? { signal: ctl.signal } : {}) });
     if (r.status === 429 && retries > 0) {          // transient burst limit
       await new Promise((res) => setTimeout(res, 3000));
       return getJson(url, ms, retries - 1);
