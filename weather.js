@@ -36,6 +36,15 @@ function setCity(city) {
   catch (e) { throw new Error("config write failed: " + e.message); }
 }
 
+function readCfg() {
+  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")) || {}; } catch { return {}; }
+}
+function saveCfgPatch(patch) {
+  const c = readCfg();
+  Object.assign(c, patch);
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(c, null, 2));
+}
+
 async function getJson(url, ms = 8000, retries = 1) {
   const ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timer = ctl ? setTimeout(() => { try { ctl.abort(); } catch {} }, ms) : null;
@@ -57,9 +66,17 @@ async function resolveLocation(city) {
     if (!r) throw new Error("unknown city \"" + city + "\"");
     return { lat: r.latitude, lon: r.longitude, name: [r.name, r.admin1, r.country].filter(Boolean).slice(0, 2).join(", ") };
   }
+  // no city: use the coords resolved once before (ipapi.co burst-limits, so
+  // never hit it twice) and only fall back to a live IP lookup on first run.
+  const cached = readCfg().weatherLoc;
+  if (cached && cached.lat != null && cached.lon != null) {
+    return { lat: cached.lat, lon: cached.lon, name: cached.name || "nearby" };
+  }
   const ip = await getJson("https://ipapi.co/json/");
   if (!ip || ip.latitude == null) throw new Error("IP location failed");
-  return { lat: ip.latitude, lon: ip.longitude, name: [ip.city, ip.region].filter(Boolean).join(", ") };
+  const name = [ip.city, ip.region].filter(Boolean).join(", ");
+  try { saveCfgPatch({ weatherLoc: { lat: ip.latitude, lon: ip.longitude, name } }); } catch {}
+  return { lat: ip.latitude, lon: ip.longitude, name };
 }
 
 /* Current conditions + 4-day outlook. city: explicit -> config -> IP. */
