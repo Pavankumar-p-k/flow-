@@ -545,7 +545,20 @@ window.notch.onWaEvent((e) => {
   if (!e) return;
   if (e.type === "pending") { waPending = e.items || []; renderPending(); }
   if (e.type === "repos") { reposCache = e.items || []; renderRepos(); }
+  if (e.type === "gh") flashNotch();
 });
+
+/* GitHub watcher found something → brief green glow on the notch.
+   Class goes on <body>: #notch.className is rewritten wholesale on every
+   expand/collapse, so a class on #notch itself would be wiped. */
+let ghFlashTimer = null;
+function flashNotch() {
+  document.body.classList.remove("gh-flash");
+  void document.body.offsetWidth; // restart the animation
+  document.body.classList.add("gh-flash");
+  clearTimeout(ghFlashTimer);
+  ghFlashTimer = setTimeout(() => document.body.classList.remove("gh-flash"), 3600);
+}
 
 /* ---------- drag-drop → WhatsApp (#9) ----------
    The window is click-through outside the notch rects, so a drag can leave

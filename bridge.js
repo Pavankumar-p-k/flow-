@@ -12,6 +12,7 @@ const { spawn } = require("child_process");
 const repos = require("./repos");
 const assistant = require("./assistant");
 const { runPs } = require("./psrun");
+const ghwatch = require("./ghwatch");
 
 const SERVICE_FILE = path.join(os.homedir(), ".local", "state", "opencode", "service.json");
 const DEBUG = path.join(__dirname, "debug.log");
@@ -272,6 +273,7 @@ const HELP = [
   "(fresh captures ONLY via /screenshot — plain \"screenshot\" text just talks to the assistant)",
   "region:  /screenshot region — drag-select a piece of the screen",
   "ocr:  /ocr (drag-select text)  ·  /ocr full (read the whole screen)",
+  "ghwatch:  ghwatch <owner>/<repo> (watch issues/PRs/CI)  ·  ghwatch (status)  ·  ghwatch off",
   "attachments:  send a photo/file in the chat — I'll read it (max 16MB); voice notes are transcribed and answered",
   "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
   "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
@@ -829,6 +831,13 @@ async function routeIncoming(raw, text, files) {
     const arg = m[1].trim();
     const mode = /^(full|screen|all|desktop)$/i.test(arg) ? "ocrfull" : "ocr";
     return enqueue("ocr", () => runRegion(mode));
+  }
+
+  // ghwatch [owner/repo | off] — watch a repo's issues/PRs/CI (#feature 2)
+  m = raw.match(/^\/?\s*gh(?:hub)?watch\b\s*(.*)$/i);
+  if (m) {
+    const arg = m[1].trim();
+    return enqueue("ghwatch", () => ghwatch.handle(arg));
   }
 
   // reminders: "remind in 10m X" / "remind at 18:30 X" / "reminders" / "cancel 3"
@@ -1409,6 +1418,8 @@ async function start(deps) {
   onEvent = deps.onEvent;
   clip = deps.clipboard || null; // #7 — electron clipboard (optional in tests)
   regionFn = deps.region || null; // /screenshot region + /ocr drag-select (main.js)
+  // GitHub watcher: resumes ghwatch-state.json and starts polling if set
+  ghwatch.start({ send: (t) => wa.send(t), onEvent: (e) => { if (onEvent) try { onEvent(e); } catch {} }, log });
   if (running) return;
   running = true;
 
@@ -1472,6 +1483,7 @@ function stop() {
   running = false;
   if (remindTimer) { clearInterval(remindTimer); remindTimer = null; }
   if (digestTimer) { clearInterval(digestTimer); digestTimer = null; }
+  try { ghwatch.stop(); } catch {}
   try { if (abort) abort.abort(); } catch {}
 }
 

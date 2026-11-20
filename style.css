@@ -57,6 +57,14 @@ html, body {
 body.fs-dim #notch { opacity: .3; }
 body.fs-dim #notch.expanded { opacity: 1; }
 
+/* ---------- GitHub watcher (#gh) ----------
+   New issue/PR or a CI result → 3 quick green glows on the notch. */
+body.gh-flash #notch { animation: ghglow 1.2s ease 3; }
+@keyframes ghglow {
+  0%, 100% { box-shadow: 0 0 18px rgba(255, 255, 255, .35); }
+  50% { box-shadow: 0 0 44px rgba(90, 255, 150, .95), 0 0 14px rgba(255, 255, 255, .8); }
+}
+
 /* ---------- shoulder flares (Dexter .nt-sh) ----------
    12x12 concave wedges that blend the black shape into the screen edge */
 .nt-sh {

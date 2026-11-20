@@ -6,4 +6,5 @@ queue-pending.json
 reminders.json
 digest-state.json
 dnd.json
+ghwatch-state.json
 chat-inbox/
