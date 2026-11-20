@@ -42,6 +42,10 @@ let introEsc = false;
 let introClickChild = null;
 let introClickTimer = null;
 const INTRO_FLAG = path.join(os.tmpdir(), "notch-intro-click.flag");
+// one-time intro gate: WITHOUT this the intro replayed on EVERY app restart
+// (startIntro has no memory), which looked like a bug — a small black shape
+// shrinking into the notch on each boot. Ctrl+Alt+N still replays it.
+const INTRO_SEEN = path.join(app.getPath("userData"), "intro-seen.flag");
 
 /* ---------- Config + phone notifications (ntfy.sh) ---------- */
 
@@ -1024,8 +1028,16 @@ app.whenReady().then(async () => {
   // Ensure 24/7: register autostart on first run
   if (!(await regQuery())) await regAdd();
 
-  // Intro: plays once, shortly after the app loads
-  setTimeout(() => startIntro(), 800);
+  // Intro: plays ONCE after first run (the old code replayed it on every
+  // restart — no gate existed despite the comment). Ctrl+Alt+N replays.
+  setTimeout(() => {
+    try {
+      if (fs.existsSync(INTRO_SEEN)) { ilog("INTRO already seen - skipped"); return; }
+    } catch {}
+    if (startIntro()) {
+      try { fs.writeFileSync(INTRO_SEEN, new Date().toISOString()); } catch {}
+    }
+  }, 800);
 
   // Debug: replay the intro on demand
   try {
