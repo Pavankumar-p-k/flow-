@@ -943,6 +943,24 @@ function createWindow() {
   startHoverWatch();
   win.once("ready-to-show", () => win.showInactive());
   win.on("closed", () => { win = null; });
+
+  // diagnostics + safety for "pill shrinks after a hotkey" reports:
+  // log every window resize that WE did not animate (external resizes from
+  // system hotkeys show up with their exact bounds), and re-assert the
+  // correct bounds if Windows restores us at a wrong size.
+  win.on("resize", () => {
+    if (animTimer) return; // our own 240ms expand/collapse animation
+    try { ilog("RESIZE external " + JSON.stringify(win.getBounds())); } catch {}
+  });
+  const reassert = (why) => {
+    try {
+      const b = boundsFor(expanded);
+      ilog("REASSERT " + why + " -> " + JSON.stringify(b));
+      win.setBounds(b);
+    } catch {}
+  };
+  win.on("restore", () => reassert("restore"));
+  win.on("maximize", () => reassert("maximize"));
 }
 
 function createTray() {

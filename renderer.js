@@ -335,6 +335,8 @@ document.querySelectorAll(".mctrl").forEach((btn) => {
 });
 
 document.addEventListener("keydown", (e) => {
+  console.log("KEY code=" + e.code + " key=" + e.key +
+    " mod=" + (e.ctrlKey ? "C" : "-") + (e.altKey ? "A" : "-") + (e.metaKey ? "M" : "-") + (e.shiftKey ? "S" : "-"));
   if (e.key === "Escape") window.notch.forceCollapse();
   const i = PAGES.indexOf(page);
   if (e.key === "ArrowLeft") setPage(PAGES[(i + PAGES.length - 1) % PAGES.length]);
@@ -359,6 +361,25 @@ setPage(page);
 restoreSub(page);
 render();
 renderMedia();
+
+// diagnostics: log any change of the rendered pill / window size (bug
+// report: pill reportedly shrinks to ~5x15mm on a keyboard hotkey)
+(() => {
+  let lw = -1, lh = -1, ww = -1, wh = -1;
+  setInterval(() => {
+    const p = $("pill");
+    if (!p) return;
+    const w = p.offsetWidth, h = p.offsetHeight;
+    if (w !== lw || h !== lh) {
+      if (lw !== -1) console.log("PILL size " + w + "x" + h + " (was " + lw + "x" + lh + ")");
+      lw = w; lh = h;
+    }
+    if (window.innerWidth !== ww || window.innerHeight !== wh) {
+      if (ww !== -1) console.log("WIN size " + window.innerWidth + "x" + window.innerHeight + " (was " + ww + "x" + wh + ")");
+      ww = window.innerWidth; wh = window.innerHeight;
+    }
+  }, 500);
+})();
 
 // cat GIFs: alternate between the two desktop cats (nub + panel strip)
 (() => {
