@@ -13,6 +13,7 @@ const repos = require("./repos");
 const assistant = require("./assistant");
 const { runPs } = require("./psrun");
 const ghwatch = require("./ghwatch");
+const weather = require("./weather");
 
 const SERVICE_FILE = path.join(os.homedir(), ".local", "state", "opencode", "service.json");
 const DEBUG = path.join(__dirname, "debug.log");
@@ -274,6 +275,7 @@ const HELP = [
   "region:  /screenshot region — drag-select a piece of the screen",
   "ocr:  /ocr (drag-select text)  ·  /ocr full (read the whole screen)",
   "ghwatch:  ghwatch <owner>/<repo> (watch issues/PRs/CI)  ·  ghwatch (status)  ·  ghwatch off",
+  "weather:  weather (current + 4-day)  ·  weather <city> (set the default)",
   "attachments:  send a photo/file in the chat — I'll read it (max 16MB); voice notes are transcribed and answered",
   "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
   "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
@@ -397,6 +399,11 @@ function digestCfg() {
 async function fmtDigest() {
   const st0 = getState ? getState() : null;
   const lines = ["🗞 NOTCH DAILY DIGEST — " + new Date().toDateString()];
+  // morning brief: weather first (fresh fetch; silent if offline)
+  try {
+    const w = await weather.get(null);
+    if (w && w.ok) lines.push(weather.fmtLine(w));
+  } catch (e) { log("digest weather err " + e.message); }
   if (st0) {
     const active = Object.keys(st0.active || {}).length;
     lines.push("opencode: " + (st0.online ? "online" : "OFFLINE") +
@@ -840,6 +847,14 @@ async function routeIncoming(raw, text, files) {
     return enqueue("ghwatch", () => ghwatch.handle(arg));
   }
 
+  // weather [city] — current conditions + 4-day outlook (#feature 3).
+  // With an arg the city is saved as the default (pill + digest use it).
+  m = raw.match(/^\/?\s*weather\b\s*(.*)$/i);
+  if (m) {
+    const arg = m[1].trim();
+    return enqueue("weather", () => cmdWeather(arg));
+  }
+
   // reminders: "remind in 10m X" / "remind at 18:30 X" / "reminders" / "cancel 3"
   m = raw.match(/^\/?\s*remind(?:er)?s?\b\s*(.*)$/i);
   if (m) {
@@ -1142,6 +1157,21 @@ function runRegion(mode) {
       resolve(wa.send("⚠️ selection timed out — try /screenshot region again."));
     }, 120000);
   });
+}
+
+/* weather [city]: fresh Open-Meteo fetch; an argument becomes the default
+   city (config.json weatherCity) — only after the fetch proves it exists. */
+async function cmdWeather(arg) {
+  const cityArg = String(arg || "").replace(/^\s*(?:in|for|at)\s+/i, "").trim();
+  try {
+    const w = await weather.get(cityArg || null);
+    if (cityArg) {
+      try { weather.setCity(cityArg); } catch (e) { log("weather city save err " + e.message); }
+    }
+    return wa.send(weather.fmtFull(w, cityArg ? "city saved as default — bare \"weather\" uses it" : null));
+  } catch (e) {
+    return wa.send("⚠️ weather unavailable: " + e.message);
+  }
 }
 
 function runAction(a) {

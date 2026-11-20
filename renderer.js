@@ -560,6 +560,15 @@ function flashNotch() {
   ghFlashTimer = setTimeout(() => document.body.classList.remove("gh-flash"), 3600);
 }
 
+/* weather pill: main pushes fresh conditions every 30 min (#feature 3) */
+window.notch.onWeather((w) => {
+  const el = $("pill-weather");
+  if (!el || !w || !w.ok) return;
+  el.textContent = w.emoji + " " + w.temp + "°";
+  el.title = w.city + " · " + w.text + " · feels " + w.feels + "°";
+  el.style.display = "";
+});
+
 /* ---------- drag-drop → WhatsApp (#9) ----------
    The window is click-through outside the notch rects, so a drag can leave
    the window without a dragleave — a 500ms watchdog clears the veil when

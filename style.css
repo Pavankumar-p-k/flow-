@@ -122,6 +122,7 @@ body.gh-flash #notch { animation: ghglow 1.2s ease 3; }
 
 .pill-item { display: flex; align-items: center; gap: 6px; }
 #pill-tokens { color: var(--blue); }
+#pill-weather { color: #ffd479; white-space: nowrap; }
 .media-ico { color: var(--violet); font-size: 12px; opacity: .3; }
 .media-ico.playing { opacity: 1; animation: pulse 1.6s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: .5; } 50% { opacity: 1; } }

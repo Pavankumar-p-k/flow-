@@ -15,6 +15,7 @@ const CONFIG_FILE = path.join(APP_DIR, "config.json");
 const wa = require("./whatsapp");
 const bridge = require("./bridge");
 const { runPs } = require("./psrun");
+const weather = require("./weather");
 const INTRO = require("./intro/intro.config");   // one config: clips + timings
 
 // Dexter's nub is 96x28 r12; the window adds room for the shoulder flares
@@ -353,6 +354,24 @@ function startFullscreenWatcher() {
     fsChild = null;
     setTimeout(startFullscreenWatcher, 5000);
   });
+}
+
+/* ---------- weather pill (#feature 3) ----------
+   Refresh every 30 min (and once at boot) and push the current conditions
+   to the notch pill. City comes from config.json weatherCity; without one
+   weather.js locates by IP. Errors just leave the pill hidden. */
+let weatherTimer = null;
+async function refreshWeather() {
+  try {
+    const cfg = loadConfig() || {};
+    const w = await weather.get(cfg.weatherCity || null);
+    if (w && w.ok && win && !win.isDestroyed()) win.webContents.send("weather", w);
+  } catch (e) { ilog("WEATHER err " + e.message); }
+}
+function startWeather() {
+  refreshWeather();
+  if (weatherTimer) clearInterval(weatherTimer);
+  weatherTimer = setInterval(refreshWeather, 30 * 60 * 1000);
 }
 
 ipcMain.on("media", (_e, action) => {
@@ -983,6 +1002,7 @@ app.whenReady().then(async () => {
   startMediaWatcher();
   startNotifyWatcher();
   startFullscreenWatcher();
+  startWeather();
   // Ensure 24/7: register autostart on first run
   if (!(await regQuery())) await regAdd();
 
