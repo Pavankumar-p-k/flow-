@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld("notch", {
   onIntroVisible: (cb) => ipcRenderer.on("intro-visible", (_e, v) => cb(v)),
   onFullscreen: (cb) => ipcRenderer.on("fullscreen", (_e, v) => cb(v)),
   onWeather: (cb) => ipcRenderer.on("weather", (_e, v) => cb(v)),
+  onNotchMode: (cb) => ipcRenderer.on("notch-mode", (_e, v) => cb(v)),
   regionSelected: (r) => ipcRenderer.send("region-selected", r),
   regionCancel: () => ipcRenderer.send("region-cancel"),
 });

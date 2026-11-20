@@ -62,6 +62,10 @@ if (!config || !config.ntfyTopic) {
   if (config.notifyEnabled == null) config.notifyEnabled = true;
   saveConfig(config);
 }
+// manual visibility mode (user request: shrink/hide the notch from anywhere
+// on the desktop). "shrunk" = tiny nub, "hidden" = invisible + click-through.
+// Persisted in config.json so it survives restarts.
+let notchMode = config.notchMode === "shrunk" || config.notchMode === "hidden" ? config.notchMode : "normal";
 
 function notify(title, message, tags) {
   config = loadConfig() || config; // #3 — chat "config" edits take effect live
@@ -200,7 +204,27 @@ function sendLayout() {
   if (win && !win.isDestroyed()) win.webContents.send("layout", { expanded, pinned });
 }
 
+/* ---------- manual shrink / hide (Ctrl+Alt+M / Ctrl+Alt+H) ----------
+   normal <-> shrunk (tiny nub) <-> hidden (invisible, fully click-through).
+   The renderer renders the actual mode (body.notch-shrunk / notch-hidden);
+   hover rects shrink with the pill automatically because reportRects reads
+   getBoundingClientRect (CSS-transformed size). */
+function setNotchMode(m) {
+  if (m !== "normal" && m !== "shrunk" && m !== "hidden") return;
+  if (m === notchMode) return;
+  notchMode = m;
+  try { const c = loadConfig() || {}; c.notchMode = m; saveConfig(c); } catch {}
+  if (expanded) collapse(); // never leave the panel open in a mini mode
+  if (m === "hidden") applyMouseIgnore(true); // no invisible mouse-grabber
+  if (win && !win.isDestroyed()) win.webContents.send("notch-mode", m);
+  ilog("NOTCH MODE " + m);
+  rebuildTrayMenu();
+}
+function toggleShrink() { setNotchMode(notchMode === "shrunk" ? "normal" : "shrunk"); }
+function toggleHide() { setNotchMode(notchMode === "hidden" ? "normal" : "hidden"); }
+
 function expand() {
+  if (notchMode === "hidden") return; // hidden stays hidden until toggled back
   if (leaveTimer) { clearTimeout(leaveTimer); leaveTimer = null; }
   setExpanded(true);
 }
@@ -591,6 +615,12 @@ function startHoverWatch() {
   hoverTimer = setInterval(() => {
     if (!win || win.isDestroyed()) return;
     if (introWin && !introWin.isDestroyed()) return;   // intro owns the screen right now
+    if (notchMode === "hidden") {                      // invisible: never expand, never grab the mouse
+      applyMouseIgnore(true);
+      if (expanded) collapse();
+      lastOver = false;
+      return;
+    }
     const b = win.getBounds();
     const p = screen.getCursorScreenPoint();
     const x = p.x - b.x;
@@ -946,6 +976,10 @@ function createWindow() {
   win.loadFile(path.join(__dirname, "index.html"));
   startHoverWatch();
   win.once("ready-to-show", () => win.showInactive());
+  // push the persisted shrink/hide mode so a restart keeps its state
+  win.webContents.on("did-finish-load", () => {
+    try { win.webContents.send("notch-mode", notchMode); } catch {}
+  });
   win.on("closed", () => { win = null; });
 
   // diagnostics + safety for "pill shrinks after a hotkey" reports:
@@ -980,8 +1014,10 @@ async function rebuildTrayMenu() {
   if (!tray) return;
   const hasAuto = await regQuery();
   const menu = Menu.buildFromTemplate([
-    { label: "Show Notch", click: () => { if (!win) createWindow(); expand(); win && win.showInactive(); } },
+    { label: "Show Notch", click: () => { if (notchMode !== "normal") setNotchMode("normal"); if (!win) createWindow(); expand(); win && win.showInactive(); } },
     { label: "Hide Notch", click: () => collapse() },
+    { label: "Shrink to nub (Ctrl+Alt+M)", type: "checkbox", checked: notchMode === "shrunk", click: () => toggleShrink() },
+    { label: "Hide completely (Ctrl+Alt+H)", type: "checkbox", checked: notchMode === "hidden", click: () => toggleHide() },
     { type: "separator" },
     { label: "ntfy topic: " + config.ntfyTopic, click: () => { clipboard.writeText(config.ntfyTopic); } },
     {
@@ -1044,6 +1080,17 @@ app.whenReady().then(async () => {
     const ok = globalShortcut.register(INTRO.replayShortcut, () => startIntro());
     ilog("INTRO replay shortcut " + INTRO.replayShortcut + (ok ? " registered" : " ALREADY TAKEN"));
   } catch (e) { ilog("INTRO replay shortcut err " + e.message); }
+
+  // Manual shrink / hide — works from ANY app on the desktop (Fn+M cannot
+  // be registered: Windows never reports Fn to applications).
+  try {
+    const ok = globalShortcut.register("CommandOrControl+Alt+M", () => toggleShrink());
+    ilog("SHRINK shortcut Ctrl+Alt+M " + (ok ? "registered" : "ALREADY TAKEN"));
+  } catch (e) { ilog("SHRINK shortcut err " + e.message); }
+  try {
+    const ok = globalShortcut.register("CommandOrControl+Alt+H", () => toggleHide());
+    ilog("HIDE shortcut Ctrl+Alt+H " + (ok ? "registered" : "ALREADY TAKEN"));
+  } catch (e) { ilog("HIDE shortcut err " + e.message); }
 
   // WhatsApp bridge: OpenCode event stream → chat, replies → prompts
   if (config.whatsappEnabled !== false) {

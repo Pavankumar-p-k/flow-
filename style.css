@@ -57,6 +57,21 @@ html, body {
 body.fs-dim #notch { opacity: .3; }
 body.fs-dim #notch.expanded { opacity: 1; }
 
+/* ---------- manual shrink / hide (Ctrl+Alt+M / Ctrl+Alt+H) ----------
+   shrunk = tiny nub (pill shrinks, content hidden except the live dot);
+   hover still expands to the full panel and collapsing shrinks it again.
+   hidden = fully invisible; main.js keeps the window click-through and
+   blocks hover-expand while in this mode. */
+body.notch-shrunk #notch.collapsed #pill {
+  min-width: 56px;
+  height: 20px;
+  padding: 0 8px;
+  gap: 4px;
+}
+body.notch-shrunk #notch.collapsed #pill > * { display: none; }
+body.notch-shrunk #notch.collapsed #pill > #pill-dot { display: inline-block; }
+body.notch-hidden #notch { visibility: hidden; }
+
 /* ---------- GitHub watcher (#gh) ----------
    New issue/PR or a CI result → 3 quick green glows on the notch. */
 body.gh-flash #notch { animation: ghglow 1.2s ease 3; }

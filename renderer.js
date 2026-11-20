@@ -590,6 +590,14 @@ window.notch.onWeather((w) => {
   el.style.display = "";
 });
 
+/* manual shrink/hide mode (Ctrl+Alt+M / Ctrl+Alt+H). Body classes like
+   fs-dim — #notch.className is rewritten wholesale on every layout. */
+window.notch.onNotchMode((m) => {
+  document.body.classList.toggle("notch-shrunk", m === "shrunk");
+  document.body.classList.toggle("notch-hidden", m === "hidden");
+  reportRects(); // hover rects follow the (possibly tiny) pill automatically
+});
+
 /* ---------- drag-drop → WhatsApp (#9) ----------
    The window is click-through outside the notch rects, so a drag can leave
    the window without a dragleave — a 500ms watchdog clears the veil when
