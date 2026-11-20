@@ -36,11 +36,15 @@ function setCity(city) {
   catch (e) { throw new Error("config write failed: " + e.message); }
 }
 
-async function getJson(url, ms = 8000) {
+async function getJson(url, ms = 8000, retries = 1) {
   const ctl = typeof AbortController !== "undefined" ? new AbortController() : null;
   const timer = ctl ? setTimeout(() => { try { ctl.abort(); } catch {} }, ms) : null;
   try {
     const r = await fetch(url, ctl ? { signal: ctl.signal } : {});
+    if (r.status === 429 && retries > 0) {          // transient burst limit
+      await new Promise((res) => setTimeout(res, 3000));
+      return getJson(url, ms, retries - 1);
+    }
     if (!r.ok) throw new Error("HTTP " + r.status);
     return await r.json();
   } finally { if (timer) clearTimeout(timer); }
