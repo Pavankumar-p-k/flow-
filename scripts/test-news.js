@@ -13,8 +13,11 @@ const NS = path.join(__dirname, "..", "news-state.json");
 const DS = path.join(__dirname, "..", "digest-state.json");
 const CFG = path.join(__dirname, "..", "config.json");
 const PEND = path.join(__dirname, "..", "queue-pending.json");
+// fmtDigest also builds the radar/probe sections -> they write state too
+const MR = path.join(__dirname, "..", "modelradar-state.json");
+const MP = path.join(__dirname, "..", "modelprobe-state.json");
 function snap(f) { try { return fs.readFileSync(f, "utf8"); } catch { return null; } }
-const orig = { ns: snap(NS), ds: snap(DS), cfg: snap(CFG), pend: snap(PEND) };
+const orig = { ns: snap(NS), ds: snap(DS), cfg: snap(CFG), pend: snap(PEND), mr: snap(MR), mp: snap(MP) };
 function restoreAll() {
   const put = (f, v) => {
     try {
@@ -23,6 +26,7 @@ function restoreAll() {
     } catch {}
   };
   put(NS, orig.ns); put(DS, orig.ds); put(CFG, orig.cfg); put(PEND, orig.pend);
+  put(MR, orig.mr); put(MP, orig.mp);
 }
 try { if (fs.existsSync(NS)) fs.unlinkSync(NS); } catch {}
 // suppress the boot catch-up digest pump (same trick as test-weather)

@@ -12,13 +12,21 @@ const path = require("path");
 const CFG = path.join(__dirname, "..", "config.json");
 const DSTATE = path.join(__dirname, "..", "digest-state.json");
 const PENDING = path.join(__dirname, "..", "queue-pending.json");
+// the digest now also builds radar/probe/news sections (real network here)
+const EXTRA = ["modelradar-state.json", "modelprobe-state.json", "news-state.json"]
+  .map((f) => path.join(__dirname, "..", f));
 function snap(f) { try { return fs.readFileSync(f, "utf8"); } catch { return null; } }
 const origCfg = snap(CFG), origD = snap(DSTATE), origP = snap(PENDING);
+const origExtra = EXTRA.map(snap);
 function restoreAll() {
   try {
     if (origCfg != null) fs.writeFileSync(CFG, origCfg); else if (fs.existsSync(CFG)) fs.unlinkSync(CFG);
     if (origD != null) fs.writeFileSync(DSTATE, origD); else if (fs.existsSync(DSTATE)) fs.unlinkSync(DSTATE);
     if (origP != null) fs.writeFileSync(PENDING, origP); else if (fs.existsSync(PENDING)) fs.unlinkSync(PENDING);
+    EXTRA.forEach((f, i) => {
+      if (origExtra[i] != null) fs.writeFileSync(f, origExtra[i]);
+      else if (fs.existsSync(f)) fs.unlinkSync(f);
+    });
   } catch {}
 }
 

@@ -439,10 +439,19 @@ async function fmtDigest() {
   try {
     const secs = await Promise.all([
       modelradar.section(), modelprobe.section(), selfaudit.section(), news.section(),
-    ].map((p) => Promise.race([
-      Promise.resolve(p).catch((e) => { log("digest section err " + e.message); return null; }),
-      new Promise((r) => setTimeout(() => { log("digest section timeout"); r(null); }, 15000)),
-    ])));
+    ].map((p) => new Promise((resolve) => {
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        log("digest section timeout");
+        resolve(null);
+      }, 15000);
+      Promise.resolve(p).then(
+        (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } },
+        (e) => { if (!done) { done = true; clearTimeout(timer); log("digest section err " + e.message); resolve(null); } },
+      );
+    })));
     for (const s of secs) if (s) lines.push("", s);
   } catch (e) { log("digest sections err " + e.message); }
   try {

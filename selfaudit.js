@@ -18,6 +18,7 @@ const SELF_HEALED = [
   /gone .*— recreating/i,          // session expired -> recreated on the spot
   /model fallback:/i,              // our own chain-stepping info line
   /recovered/i,
+  /"error"\s*:\s*""/,              // status blobs where error is EMPTY (WA_STATUS…)
 ];
 
 // anything error-ish survived the exceptions above = a real finding
@@ -33,6 +34,7 @@ const KNOWN = [
   { re: /LOAD_FAIL/i, fix: "window failed to load — watching for a pattern" },
   { re: /timed out|timeout/i, fix: "timeout — transient, retry/backoff where wired" },
   { re: /ENOSPC|EPERM|ENOENT|EACCES/i, fix: "filesystem problem — needs review" },
+  { re: /POLL_ERR|POLL online=false/i, fix: "opencode unreachable — the poll retries until it's back" },
 ];
 
 function stripTs(line) {

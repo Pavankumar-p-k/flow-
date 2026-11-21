@@ -8,6 +8,23 @@ let original = null;
 let hadState = false;
 try { original = fs.readFileSync(STATE, "utf8"); hadState = true; } catch {}
 
+// the Tony/news sections use REAL network in this test -> they write their
+// own state files too; snapshot those so the live app keeps its baselines
+const EXTRA = ["news-state.json", "modelradar-state.json", "modelprobe-state.json"];
+const extraOrig = EXTRA.map((f) => {
+  try { return fs.readFileSync(path.join(__dirname, "..", f), "utf8"); } catch { return null; }
+});
+
+function restoreExtra() {
+  EXTRA.forEach((f, i) => {
+    const p = path.join(__dirname, "..", f);
+    try {
+      if (extraOrig[i] != null) fs.writeFileSync(p, extraOrig[i]);
+      else if (fs.existsSync(p)) fs.unlinkSync(p);
+    } catch {}
+  });
+}
+
 // The live app may have already marked TODAY's digest as sent — bridge reads
 // this file at require time, so reset BEFORE requiring it. hour:24 suppresses
 // the boot catch-up pump (real time is past 09:00) until "digest at 18:00"
@@ -21,6 +38,7 @@ function restoreState() {
     if (hadState) fs.writeFileSync(STATE, original);
     else if (fs.existsSync(STATE)) fs.unlinkSync(STATE);
   } catch {}
+  restoreExtra();
 }
 
 function t(label, cond, extra) {
