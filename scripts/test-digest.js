@@ -43,10 +43,11 @@ const state = {
 
 const digests = () => sent.filter((s) => s.includes("DAILY DIGEST"));
 
-// sendDigest() scans 15+ repos and can take several seconds — poll instead
-// of guessing a fixed delay.
+// sendDigest() scans 15+ repos AND builds the Tony/news sections (first
+// build does real network: model list, chain pings, HN + RSS — later sends
+// hit the 30-min module cache) — poll instead of guessing a fixed delay.
 async function waitFor(fn, ms) {
-  const end = Date.now() + (ms || 20000);
+  const end = Date.now() + (ms || 45000);
   while (Date.now() < end) {
     if (fn()) return true;
     await new Promise((r) => setTimeout(r, 200));

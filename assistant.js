@@ -545,4 +545,10 @@ async function askOnce(userText, retried, inFiles) {
 
 restore();
 
-module.exports = { ask, notify, get sessionID() { return sessionID; }, MAX_FILE_BYTES, _runPdfScan: runPdfScan };
+module.exports = {
+  ask, notify, get sessionID() { return sessionID; }, MAX_FILE_BYTES, _runPdfScan: runPdfScan,
+  // Tony pack #2 — the daily health probe reads the chain and steps it
+  chain: () => MODEL_CHAIN.map((m) => ({ ...m })),
+  currentModel: () => ({ ...MODEL_CHAIN[modelIdx] }),
+  advanceModel,
+};

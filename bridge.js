@@ -14,6 +14,11 @@ const assistant = require("./assistant");
 const { runPs } = require("./psrun");
 const ghwatch = require("./ghwatch");
 const weather = require("./weather");
+// Tony pack (#1-3) + news pack (#4-5): sections of the 09:00 newspaper
+const modelradar = require("./modelradar");
+const modelprobe = require("./modelprobe");
+const selfaudit = require("./selfaudit");
+const news = require("./news");
 
 const SERVICE_FILE = path.join(os.homedir(), ".local", "state", "opencode", "service.json");
 const DEBUG = path.join(__dirname, "debug.log");
@@ -276,6 +281,7 @@ const HELP = [
   "ocr:  /ocr (drag-select text)  ·  /ocr full (read the whole screen)",
   "ghwatch:  ghwatch <owner>/<repo> (watch issues/PRs/CI)  ·  ghwatch (status)  ·  ghwatch off",
   "weather:  weather (current + 4-day)  ·  weather <city> (set the default)",
+  "news:  news (HN top-5 + company headlines)  ·  news hn  ·  news <company>",
   "attachments:  send a photo/file in the chat — I'll read it (max 16MB); voice notes are transcribed and answered",
   "reminders:  remind in 10m <text>  ·  remind at 18:30 <text>  ·  cancel <n>",
   "sessions:  run <n> <prompt>  ·  stop <n>   (n from the sessions list)",
@@ -426,6 +432,19 @@ async function fmtDigest() {
     lines.push("", "⏰ reminders today:");
     for (const r of today.slice(0, 6)) lines.push("  • " + fmtWhen(r.at) + " — " + r.text);
   }
+  // Tony pack + news pack — one newspaper: model radar, chain health,
+  // self-audit, HN top-5, company giants. Built in parallel; every section
+  // fails soft (a dead feed never kills the digest) and the whole block is
+  // hard-capped at 15s so a hung request can't stall the morning.
+  try {
+    const secs = await Promise.all([
+      modelradar.section(), modelprobe.section(), selfaudit.section(), news.section(),
+    ].map((p) => Promise.race([
+      Promise.resolve(p).catch((e) => { log("digest section err " + e.message); return null; }),
+      new Promise((r) => setTimeout(() => { log("digest section timeout"); r(null); }, 15000)),
+    ])));
+    for (const s of secs) if (s) lines.push("", s);
+  } catch (e) { log("digest sections err " + e.message); }
   try {
     const list = await repos.list(true);
     const dirty = list.filter((r) => r.ok && r.dirty);
@@ -853,6 +872,13 @@ async function routeIncoming(raw, text, files) {
   if (m) {
     const arg = m[1].trim();
     return enqueue("weather", () => cmdWeather(arg));
+  }
+
+  // news [hn|<company>] — HN top-5 + company headlines on demand (#4/#5)
+  m = raw.match(/^\/?\s*news\b\s*(.*)$/i);
+  if (m) {
+    const arg = m[1].trim();
+    return enqueue("news", () => news.handle(arg));
   }
 
   // reminders: "remind in 10m X" / "remind at 18:30 X" / "reminders" / "cancel 3"
@@ -1450,6 +1476,12 @@ async function start(deps) {
   regionFn = deps.region || null; // /screenshot region + /ocr drag-select (main.js)
   // GitHub watcher: resumes ghwatch-state.json and starts polling if set
   ghwatch.start({ send: (t) => wa.send(t), onEvent: (e) => { if (onEvent) try { onEvent(e); } catch {} }, log });
+  // Tony + news packs: no timers of their own — fmtDigest builds their
+  // sections on demand; urgent pushes go through the same WhatsApp outbox.
+  modelradar.start({ send: (t) => wa.send(t), log });
+  modelprobe.start({ send: (t) => wa.send(t), log });
+  selfaudit.start({ log });
+  news.start({ send: (t) => wa.send(t), log });
   if (running) return;
   running = true;
 
