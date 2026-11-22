@@ -195,6 +195,32 @@ async function handle(arg) {
   catch (e) { logFn("news send err " + e.message); }
 }
 
+/* The paper's links, numbered for `open <n>` — last-collected data if we
+   have it (the digest/news command built it), fetched on demand otherwise. */
+async function links() {
+  if (!state) state = load() || { seen: [] };
+  let data = cache.data;
+  if (!data) {
+    data = await collect();
+    cache = { at: Date.now(), data };
+  }
+  const out = [];
+  for (const h of (data.hn || [])) out.push({ title: h.title, url: h.url, group: "hn" });
+  for (const g of (data.giants || [])) out.push({ title: g.company + ": " + g.title, url: g.url, group: "giants" });
+  return out;
+}
+
+/* One line for the daily brief — last-collected headlines, no network. */
+function brief() {
+  if (!cache.data) return null;
+  const hn = (cache.data.hn || [])[0];
+  const giants = cache.data.giants || [];
+  const parts = [];
+  if (hn) parts.push("📰 HN #1: " + hn.title + " (" + hn.points + ")");
+  if (giants.length) parts.push("🏢 " + giants.length + " company headlines");
+  return parts.length ? "news: " + parts.join(" · ") : null;
+}
+
 function start(deps) {
   sendFn = (deps && deps.send) || null;
   logFn = (deps && deps.log) || (() => {});
@@ -202,4 +228,4 @@ function start(deps) {
   cache = { at: 0, data: null };
 }
 
-module.exports = { start, section, handle, parseFeed, collect, _state: () => state };
+module.exports = { start, section, handle, links, brief, parseFeed, collect, _state: () => state };

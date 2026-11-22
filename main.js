@@ -1107,6 +1107,22 @@ app.whenReady().then(async () => {
     const authDir = path.join(APP_DIR, "wa-auth");
     if (fs.existsSync(path.join(authDir, "creds.json"))) wa.connect();
   }
+
+  // First-open-of-day digest (#8 rework): waking from sleep and unlocking
+  // the session both count as "opening the laptop" — pump immediately.
+  // pumpDigest is idempotent (the day is marked BEFORE the first send), so
+  // resume+unlock in the same morning can never double-send.
+  try {
+    const { powerMonitor } = require("electron");
+    const onOpen = () => {
+      ilog("DIGEST first-open trigger (resume/unlock)");
+      try { bridge.pumpDigest(); } catch (e) { ilog("digest pump err " + e.message); }
+      refreshWeather(); // pill should be current the moment they're back
+    };
+    powerMonitor.on("resume", onOpen);
+    powerMonitor.on("unlock-screen", onOpen);
+    ilog("DIGEST first-open hooks registered (resume + unlock-screen)");
+  } catch (e) { ilog("powerMonitor err " + e.message); }
 });
 
 app.on("window-all-closed", (e) => {

@@ -101,6 +101,23 @@ async function section(opts) {
   return text;
 }
 
+/* One line for the daily brief — same classifier over the last 24h,
+   local file only (a few ms), no cache. */
+function brief() {
+  let raw;
+  try { raw = fs.readFileSync(LOG_FILE, "utf8"); } catch { return null; }
+  const cut = Date.now() - WINDOW_MS;
+  const lines = raw.split("\n").filter((l) => {
+    const ts = Date.parse(l.slice(0, 24));
+    return Number.isFinite(ts) && ts >= cut;
+  });
+  const a = audit(lines);
+  if (!a.errors.length) return "🔧 audit: clean (" + a.benign + " benign lines)";
+  const top = a.errors[0];
+  return "🔧 audit: " + a.errors.length + " finding(s) · top " + top.n + "× " +
+    top.label.slice(0, 55) + (top.fix ? "" : " (needs review)");
+}
+
 function start() { cache = { at: 0, text: null }; }
 
-module.exports = { start, section, audit, LOG_FILE };
+module.exports = { start, section, brief, audit, LOG_FILE };

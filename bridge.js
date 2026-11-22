@@ -290,7 +290,10 @@ const HELP = [
   "dnd — do not disturb: dnd on 30m · dnd off (silences push + 🔔 mirror)",
   "config — view · config mirror off · config digest 18:00 (live settings)",
   "clipboard:  copy <text>  ·  clipboard / paste  (read it back)",
-  "digest — daily summary (auto 09:00 · digest at 18:00 to reschedule)",
+  "digest — the daily paper (auto: first laptop open of the day)",
+  "digest at 18:00 — schedule instead · digest auto — back to first-open",
+  "brief — 8-line short summary of the day (summary · tldr)",
+  "links — numbered paper links · open <n> | hn | giants | all (browser tabs)",
   "system:  \"how many tabs are open\" · \"what app is in front\"",
   "",
   "to answer a prompt:  allow / always / reject",
@@ -374,11 +377,15 @@ function pumpReminders() {
 }
 
 /* ---------- daily digest (#8) ----------
-   One summary a day, pushed to the chat at a set time (default 09:00;
-   config.json {"digest":{"hour":9,"minute":0}} or "digest at 18:00").
-   If the PC was off at that time it fires late on boot — exactly once. */
+   DEFAULT: first-open mode — the day's ONE paper goes out the first time
+   the app sees you on a NEW day (boot, wake from sleep, session unlock, or
+   the minute pump) — with a quiet floor: never between 00:00-05:00.
+   An explicit schedule ("digest at 18:00" / "config digest 18:00") overrides
+   it until "digest auto" clears it back. Marked BEFORE the first send, so
+   resume+unlock in the same morning can never double-send. */
 
 const DIGEST_STATE = path.join(__dirname, "digest-state.json");
+const OPEN_FLOOR = 5; // first-open mode never fires before 05:00
 let digestState = { day: null, hour: null, minute: null };
 try { digestState = Object.assign(digestState, JSON.parse(fs.readFileSync(DIGEST_STATE, "utf8"))); } catch {}
 let digestTimer = null;
@@ -387,18 +394,33 @@ function saveDigestState() {
   try { fs.writeFileSync(DIGEST_STATE, JSON.stringify(digestState)); } catch {}
 }
 
+/* "digest auto" / "config digest auto" — drop the explicit schedule (both
+   the config.json copy and the quick override) so first-open mode applies. */
+function clearDigestSchedule() {
+  try {
+    const c = readConfigFile();
+    if (c && c.digest != null) { delete c.digest; writeConfigFile(c); }
+  } catch (e) { log("digest schedule clear err " + e.message); }
+  digestState.hour = null;
+  digestState.minute = null;
+  saveDigestState();
+  log("digest schedule cleared -> first-open mode");
+}
+
 function digestCfg() {
-  const cfg = { hour: 9, minute: 0, enabled: true };
+  const cfg = { mode: "open", floor: OPEN_FLOOR, hour: 9, minute: 0, enabled: true };
   try {
     const c = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf8"));
     if (c && c.digest === false) cfg.enabled = false;
     else if (c && c.digest && typeof c.digest === "object") {
-      if (typeof c.digest.hour === "number") cfg.hour = c.digest.hour;
+      if (typeof c.digest.hour === "number") { cfg.mode = "at"; cfg.hour = c.digest.hour; }
       if (typeof c.digest.minute === "number") cfg.minute = c.digest.minute;
+      if (c.digest.mode === "open") cfg.mode = "open"; // "digest auto" wrote this
+      if (typeof c.digest.floor === "number") cfg.floor = c.digest.floor;
       if (c.digest.enabled === false) cfg.enabled = false;
     }
   } catch {}
-  if (digestState.hour != null) { cfg.hour = digestState.hour; cfg.minute = digestState.minute || 0; } // "digest at" wins
+  if (digestState.hour != null) { cfg.mode = "at"; cfg.hour = digestState.hour; cfg.minute = digestState.minute || 0; } // "digest at" wins
   return cfg;
 }
 
@@ -425,6 +447,7 @@ async function fmtDigest() {
       lines.push("tools: " + (tt.succeeded || 0) + "/" + (tt.calls || 0) + " ok · " + (tt.failed || 0) + " failed");
     }
   }
+  if (isDnd()) lines.push(dndStatus());
   const endToday = new Date();
   endToday.setHours(23, 59, 59, 999);
   const today = reminders.filter((r) => r.at <= endToday.getTime()).sort((a, b) => a.at - b.at);
@@ -461,6 +484,15 @@ async function fmtDigest() {
     lines.push("", "📁 repos: " + list.length + " · " + dirty.length + " dirty" + (ahead.length ? " · " + ahead.length + " ahead" : ""));
     if (dirty.length) for (const r of dirty.slice(0, 5)) lines.push("  • " + r.name + " [" + (r.branch || "?") + "] " + r.dirty + " dirty");
     else if (list.length) lines.push("  all clean ✅");
+    // GitHub watcher status — the one repo we poll for issues/PRs/CI
+    try {
+      const g = ghwatch._state();
+      if (g && g.repo) {
+        lines.push("👀 ghwatch: " + g.repo +
+          " · open " + Object.keys(g.issues || {}).length + " issues / " + Object.keys(g.prs || {}).length + " PRs" +
+          " · last CI: " + (g.lastRunId ? (g.lastRunFail ? "FAILED" : "ok") : "—"));
+      }
+    } catch {}
   } catch { lines.push("", "📁 repos: unavailable"); }
   if (pending.size) lines.push("", "⏳ " + pending.size + " prompt(s) waiting for your reply");
   return lines.join("\n");
@@ -478,10 +510,65 @@ function pumpDigest(nowOverride) {
   if (!cfg.enabled) return;
   const now = nowOverride || new Date();
   if (digestState.day === now.toDateString()) return;
-  if (now.getHours() < cfg.hour || (now.getHours() === cfg.hour && now.getMinutes() < cfg.minute)) return;
+  if (cfg.mode === "at") {
+    // explicit schedule: fire at/after HH:MM (late is fine — boot catches up)
+    if (now.getHours() < cfg.hour || (now.getHours() === cfg.hour && now.getMinutes() < cfg.minute)) return;
+  } else if (now.getHours() < cfg.floor) {
+    return; // first-open mode: quiet floor — 00:00-05:00 never fires
+  }
   digestState.day = now.toDateString();
   saveDigestState(); // mark BEFORE sending — a crash can never double-send
   sendDigest().catch((e) => log("digest err " + e.message));
+}
+
+/* ---------- brief (#11) — the whole day in ~8 lines ----------
+   Built from LAST-RUN module data (state files + caches), so it is fast
+   and deterministic: no network except one quick weather check. `digest`
+   remains the full newspaper; this is the "just tell me the gist" view. */
+async function fmtBrief() {
+  const st0 = getState ? getState() : null;
+  const lines = ["⚡ DAILY BRIEF — " + new Date().toDateString()];
+  try {
+    const w = await weather.get(null);
+    if (w && w.ok) lines.push(weather.fmtLine(w));
+  } catch (e) { log("brief weather err " + e.message); }
+  if (st0) {
+    const active = Object.keys(st0.active || {}).length;
+    lines.push("opencode: " + (st0.online ? "online" : "OFFLINE") +
+      " · sessions: " + ((st0.sessions || []).length) + " · active: " + active);
+    const st = st0.stats;
+    if (st && st.tokens) {
+      const t = st.tokens;
+      const total = (t.input || 0) + (t.output || 0) + (t.reasoning || 0) + ((t.cache && t.cache.read) || 0);
+      lines.push("tokens 24h: " + fmtNum(total) + " (in " + fmtNum(t.input || 0) + " · out " + fmtNum(t.output || 0) + ")");
+    }
+  }
+  // one line per module, from its last run (null = never ran -> omitted)
+  for (const s of [modelradar.brief(), modelprobe.brief(), news.brief()]) if (s) lines.push(s);
+  try { const a = selfaudit.brief(); if (a) lines.push(a); } catch (e) { log("brief audit err " + e.message); }
+  try {
+    const g = ghwatch._state();
+    if (g && g.repo) {
+      lines.push("👀 ghwatch: " + g.repo + " · last CI: " +
+        (g.lastRunId ? (g.lastRunFail ? "FAILED" : "ok") : "—"));
+    }
+  } catch {}
+  const endToday = new Date();
+  endToday.setHours(23, 59, 59, 999);
+  const today = reminders.filter((r) => r.at <= endToday.getTime()).sort((a, b) => a.at - b.at);
+  if (today.length) {
+    lines.push("⏰ " + today.length + " reminder(s) today · next " +
+      fmtWhen(today[0].at) + " — " + today[0].text);
+  }
+  if (isDnd()) lines.push(dndStatus());
+  try {
+    const list = await repos.list(true);
+    const dirty = list.filter((r) => r.ok && r.dirty);
+    lines.push("📁 repos: " + list.length + " · " + dirty.length + " dirty" +
+      (pending.size ? " · ⏳ " + pending.size + " prompt(s) waiting" : ""));
+  } catch { lines.push("📁 repos: unavailable"); }
+  lines.push("", "full paper: `digest` · links: `links` · open tabs: `open all`");
+  return lines.join("\n");
 }
 
 /* ---------- do not disturb (#10 tier-1) ----------
@@ -573,16 +660,18 @@ function fmtConfig() {
     "mirror (🔔 → WhatsApp): " + (c.notifyMirror !== false ? "on" : "off"),
     "notify (ntfy push):     " + (c.notifyEnabled === false ? "off" : "on"),
     "whatsapp bridge:        " + (c.whatsappEnabled === false ? "off (after restart)" : "on"),
-    "digest: " + String(dc.hour).padStart(2, "0") + ":" + String(dc.minute).padStart(2, "0") +
-      (digestState.hour != null ? " (quick override)" : ""),
+    "digest: " + (dc.mode === "open"
+      ? "first open of the day (from " + String(dc.floor).padStart(2, "0") + ":00)"
+      : String(dc.hour).padStart(2, "0") + ":" + String(dc.minute).padStart(2, "0") +
+        (digestState.hour != null ? " (quick override)" : "")),
     "ntfy topic: " + (c.ntfyTopic ? String(c.ntfyTopic) : "(none)"),
     "",
-    "set: config mirror off · config notify off · config digest 18:00 · config ntfy <topic>",
+    "set: config mirror off · config notify off · config digest 18:00 or auto · config ntfy <topic>",
   ];
   return lines.join("\n");
 }
 
-const CONFIG_USAGE = "⚠️ usage: config (view) · config mirror off · config digest 18:00";
+const CONFIG_USAGE = "⚠️ usage: config (view) · config mirror off · config digest 18:00 or auto";
 
 function handleConfig(arg) {
   if (!arg) return wa.send(fmtConfig());
@@ -612,6 +701,11 @@ function handleConfig(arg) {
     return wa.send("✅ ntfy topic saved — set config notify on to push to it");
   }
   if (key === "digest") {
+    if (/^(auto|open|first)$/i.test(val)) {
+      clearDigestSchedule();
+      log("config digest = first-open");
+      return wa.send("✅ digest back to FIRST OPEN of the day — one paper when you open the laptop (never before 05:00)");
+    }
     const dm = val.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
     if (!dm) return wa.send(CONFIG_USAGE + " (digest: 18:00 or 9am)");
     let h = Number(dm[1]);
@@ -890,6 +984,16 @@ async function routeIncoming(raw, text, files) {
     return enqueue("news", () => news.handle(arg));
   }
 
+  // links / tabs — the paper's URLs, numbered for `open <n>` (#11)
+  m = raw.match(/^\/?\s*(?:links|tabs)\s*$/i);
+  if (m) return enqueue("links", sendLinks);
+
+  // open <n|hn|giants|all> — open the paper's links as browser tabs.
+  // Strict full-message vocab on purpose: "open notepad" / "open github.com"
+  // must keep falling through to the assistant.
+  m = raw.match(/^\/?\s*open\s+(tabs?|links?|hn|hacker|giants|compan(?:y|ies)|all|\d{1,2})\s*$/i);
+  if (m) return enqueue("open links", () => openLinks(m[1]));
+
   // reminders: "remind in 10m X" / "remind at 18:30 X" / "reminders" / "cancel 3"
   m = raw.match(/^\/?\s*remind(?:er)?s?\b\s*(.*)$/i);
   if (m) {
@@ -979,11 +1083,17 @@ async function routeIncoming(raw, text, files) {
   m = raw.match(/^\/?\s*(?:clipboard|clip|paste)\s*$/i);
   if (m) return enqueue("clipboard", sendClipboard);
 
-  // daily digest (#8): "digest" sends now · "digest at 18:00" reschedules
+  // daily digest (#8): "digest" sends now · "digest at 18:00" schedules ·
+  // "digest auto" returns to first-open-of-the-day mode
   m = raw.match(/^\/?\s*(?:digest|daily)\b\s*(.*)$/i);
   if (m) {
     const arg = m[1].trim();
     if (arg) {
+      if (/^(auto|open|first|first-open)$/i.test(arg)) {
+        clearDigestSchedule();
+        return enqueue("digest schedule", () =>
+          wa.send("🗞 daily digest set to FIRST OPEN of the day — one paper the moment you open the laptop each day (never before 05:00)"));
+      }
       const w = parseWhen(arg);
       if (w) {
         const d = new Date(w.at);
@@ -996,7 +1106,7 @@ async function routeIncoming(raw, text, files) {
             " — auto-sends daily (late is fine if the PC was off)"));
       }
       return enqueue("digest", () =>
-        wa.send("⚠️ usage: digest (send now) · digest at 18:00 (reschedule)"));
+        wa.send("⚠️ usage: digest (send now) · digest at 18:00 (schedule) · digest auto (first open)"));
     }
     return enqueue("digest", async () => {
       for (const c of chunkReply(await fmtDigest())) await wa.send(c);
@@ -1007,6 +1117,11 @@ async function routeIncoming(raw, text, files) {
     case "help":
     case "commands":
       return enqueue("help", () => wa.send(HELP));
+    case "brief":
+    case "summary":
+    case "tldr":
+    case "short":
+      return enqueue("brief", async () => wa.send(await fmtBrief()));
     case "status":
       return enqueue("status", () => wa.send(fmtStatus(st())));
     case "repos":
@@ -1207,6 +1322,55 @@ async function cmdWeather(arg) {
   } catch (e) {
     return wa.send("⚠️ weather unavailable: " + e.message);
   }
+}
+
+/* links — list the paper's URLs numbered; open <sel> — open them as
+   browser tabs (#11). Both read news.links() (the last-collected paper,
+   fetched on demand if it was never built). Opening goes through
+   runAction(browser): Electron shell in-process, PowerShell fallback —
+   unless a test injected its own openUrl. */
+let openUrl = null; // (url) => void — injected by tests; null = runAction
+
+async function sendLinks() {
+  try {
+    const list = await news.links();
+    if (!list.length) return wa.send("🔗 no links yet — send `digest` (or `news`) first.");
+    const lines = ["🔗 paper links (" + list.length + "):"];
+    list.forEach((l, i) => lines.push((i + 1) + ". " + l.title + " " + l.url));
+    lines.push("", "open <n> · open hn · open giants · open all");
+    return wa.send(lines);
+  } catch (e) {
+    return wa.send("⚠️ links failed: " + e.message);
+  }
+}
+
+async function openLinks(arg) {
+  const a = String(arg || "").trim().toLowerCase();
+  let list;
+  try { list = await news.links(); } catch (e) { return wa.send("⚠️ links unavailable: " + e.message); }
+  if (!list.length) return wa.send("🔗 no links yet — send `digest` (or `news`) first.");
+  let pick;
+  if (/^\d+$/.test(a)) {
+    const n = Number(a);
+    if (n < 1 || n > list.length) {
+      return wa.send("⚠️ no link #" + n + " — the paper has " + list.length + " (see `links`)");
+    }
+    pick = [list[n - 1]];
+  } else if (a === "hn" || a === "hacker") pick = list.filter((l) => l.group === "hn");
+  else if (/^compan/.test(a)) pick = list.filter((l) => l.group === "giants");
+  else if (/^(all|tabs?|links?)$/.test(a)) pick = list;
+  else return wa.send("⚠️ usage: open <n> · open hn · open giants · open all · links");
+  // dedupe — the same URL never opens twice in one go
+  const seen = new Set();
+  pick = pick.filter((l) => (seen.has(l.url) ? false : (seen.add(l.url), true)));
+  for (const l of pick) {
+    if (openUrl) { try { openUrl(l.url); } catch (e) { log("openUrl err " + e.message); } }
+    else runAction({ type: "browser", value: l.url });
+  }
+  log("opened " + pick.length + " link tab(s)");
+  return wa.send(pick.length === 1
+    ? "🔗 opened 1 tab — " + pick[0].title
+    : "🔗 opened " + pick.length + " tabs in your browser");
 }
 
 function runAction(a) {
@@ -1483,6 +1647,7 @@ async function start(deps) {
   onEvent = deps.onEvent;
   clip = deps.clipboard || null; // #7 — electron clipboard (optional in tests)
   regionFn = deps.region || null; // /screenshot region + /ocr drag-select (main.js)
+  openUrl = deps.openUrl || null; // #11 — `open <n>` links (tests inject a capture)
   // GitHub watcher: resumes ghwatch-state.json and starts polling if set
   ghwatch.start({ send: (t) => wa.send(t), onEvent: (e) => { if (onEvent) try { onEvent(e); } catch {} }, log });
   // Tony + news packs: no timers of their own — fmtDigest builds their

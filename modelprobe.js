@@ -204,6 +204,22 @@ async function section(opts) {
   return text;
 }
 
+/* One line for the daily brief — last probed statuses, no network. */
+function brief() {
+  if (!state) state = load();
+  if (!state || !state.prev) return null;
+  const icon = { ok: "✅", fail: "❌", limit: "⚠️", unknown: "❔" };
+  const cur = assistant.currentModel();
+  const parts = [];
+  for (const m of assistant.chain()) {
+    const s = state.prev[m.providerID + "/" + m.id];
+    if (!s) continue;
+    parts.push(m.id.split("-")[0] + " " + (icon[s] || "❔") + (m.id === cur.id ? " (now)" : ""));
+  }
+  if (!parts.length) return null;
+  return "🩺 chain: " + parts.join(" · ");
+}
+
 function start(deps) {
   sendFn = (deps && deps.send) || null;
   logFn = (deps && deps.log) || (() => {});
@@ -212,4 +228,4 @@ function start(deps) {
   cache = { at: 0, text: null };
 }
 
-module.exports = { start, section, probeOnce, ping, _state: () => state };
+module.exports = { start, section, brief, probeOnce, ping, _state: () => state };

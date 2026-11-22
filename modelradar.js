@@ -192,6 +192,18 @@ async function section(opts) {
   return text;
 }
 
+/* One line for the daily brief — local state only, no network. */
+function brief() {
+  if (!state) state = load();
+  if (!state || !state.models) return null;
+  let s = "🤖 radar: " + Object.keys(state.models).length + " local free models";
+  if (state.lastRun) {
+    const d = new Date(state.lastRun);
+    s += " · checked " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+  }
+  return s;
+}
+
 function start(deps) {
   sendFn = (deps && deps.send) || null;
   logFn = (deps && deps.log) || (() => {});
@@ -199,4 +211,4 @@ function start(deps) {
   cache = { at: 0, text: null };
 }
 
-module.exports = { start, section, localModels, webHits, worthy, _state: () => state };
+module.exports = { start, section, brief, localModels, webHits, worthy, _state: () => state };
