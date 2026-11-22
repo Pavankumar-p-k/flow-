@@ -35,6 +35,7 @@ const KNOWN = [
   { re: /timed out|timeout/i, fix: "timeout — transient, retry/backoff where wired" },
   { re: /ENOSPC|EPERM|ENOENT|EACCES/i, fix: "filesystem problem — needs review" },
   { re: /POLL_ERR|POLL online=false/i, fix: "opencode unreachable — the poll retries until it's back" },
+  { re: /WA_STATUS.*(connecting|closed|disconnected)/i, fix: "WhatsApp reconnecting — the bridge retries until it's back" },
 ];
 
 function stripTs(line) {
