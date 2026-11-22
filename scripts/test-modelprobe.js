@@ -5,6 +5,8 @@
    - run 3 = dead model comes back -> one "recovered" push
    - a 429 FreeUsageLimit never advances the chain (transient by nature)
    - all-unknown payloads -> no section at all (test doubles stay quiet)
+   - transport failure (offline) -> status "net": shown as NOT judged,
+     never advances the chain, never pushes (A1 hardening)
    modelprobe-state.json is shared with the live app -> snapshotted and
    restored; deleted first so the baseline test is genuine. */
 const fs = require("fs");
@@ -25,6 +27,7 @@ try { if (fs.existsSync(STATE)) fs.unlinkSync(STATE); } catch {}
 const DEAD = { "mimo-v2.6-flash-free": 402, "deepseek-v4.1-flash-free": 200, "hy4-flash-free": 429 };
 let MIMO_OK = false;
 let UNKNOWN = false; // proxy/test payload: 200 but no choices[]
+let NET_DOWN = false; // transport failure: fetch throws, no HTTP answer
 
 globalThis.fetch = async (url, opts) => {
   const u = String(url);
@@ -41,6 +44,7 @@ globalThis.fetch = async (url, opts) => {
   }
   if (u.includes("/chat/completions")) {
     const body = opts && opts.body ? JSON.parse(opts.body) : {};
+    if (NET_DOWN) throw new Error("fetch failed");
     if (UNKNOWN) return ok({ ok: true, data: { time: Date.now() } });
     if (body.model === "mimo-v2.6-flash-free" && !MIMO_OK) {
       return { ok: false, status: DEAD[body.model], json: async () => ({ error: "nope" }) };
@@ -94,6 +98,23 @@ function t(label, cond, extra) {
   const s4 = await probe.section({ fresh: true });
   t("all-unknown omits section", s4 === null, JSON.stringify(s4));
   t("unknown never pushes", pushes.length === 1, JSON.stringify(pushes));
+
+  /* ---- 5. network outage: transport failure is NOT a verdict ---- */
+  UNKNOWN = false;
+  NET_DOWN = true;
+  const s5 = await probe.section({ fresh: true });
+  t("outage shown as network, not judged",
+    /🌐 mimo-v2\.6-flash-free · fetch failed \(network — not judged\)/.test(s5 || "") &&
+    /🌐 deepseek-v4\.1-flash-free · fetch failed \(network — not judged\)/.test(s5 || ""), s5);
+  t("outage never advances the chain", assistant.currentModel().id === "deepseek-v4.1-flash-free",
+    JSON.stringify(assistant.currentModel()));
+  t("outage never pushes", pushes.length === 1, JSON.stringify(pushes));
+
+  /* ---- 6. network back: silent return, no fake recovery claim ---- */
+  NET_DOWN = false;
+  const s6 = await probe.section({ fresh: true });
+  t("statuses reported after outage", /✅ deepseek-v4\.1-flash-free · \d+ms/.test(s6 || ""), s6);
+  t("no fake recovery push after net", pushes.length === 1, JSON.stringify(pushes));
 
   console.log(process.exitCode ? "FAILED" : "ALL PASS");
   restore();

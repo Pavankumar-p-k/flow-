@@ -91,7 +91,11 @@ async function localIds() {
 
 /* One 1-token completion. Statuses:
      ok     — answered
-     fail   — genuinely dead (402/403/404/5xx/timeout/refused)
+     fail   — an HTTP answer says it is dead (402/403/404/5xx)
+     net    — TRANSPORT-level failure (refused/DNS/timeout/"fetch failed"):
+              the network or endpoint was unreachable, so the model is NOT
+              judged — never advances the chain, never pushes (a laptop
+              that is offline must not demote healthy models)
      limit  — 429 FreeUsageLimit: transient, recovers on its own
      unknown— proxy/test payload we cannot judge (never pushes, never advances) */
 async function ping(base, key, model) {
@@ -113,8 +117,10 @@ async function ping(base, key, model) {
     if (!j || !Array.isArray(j.choices)) return { status: "unknown", ms, note: "unexpected payload" };
     return { status: "ok", ms };
   } catch (e) {
+    // transport-level: offline / refused / timed out with no HTTP answer —
+    // not a verdict on the model (A1 hardening)
     return {
-      status: "fail",
+      status: "net",
       ms: Date.now() - t0,
       note: (e && e.name === "AbortError") ? "timeout" : String((e && e.message) || e),
     };
@@ -164,13 +170,14 @@ async function section(opts) {
     }
   }
 
-  // pushes only on change vs the previous run (first run = baseline)
+  // pushes only on change vs the previous run (first run = baseline).
+  // net is "not judged" — entering/leaving it never claims recovery or death.
   const prev = state.prev;
   if (prev) {
     for (const r of results) {
       const was = prev[r.key];
       if (was === r.status) continue;
-      if (r.status === "ok" && was) await push("🟢 model recovered: " + r.id);
+      if (r.status === "ok" && (was === "fail" || was === "limit")) await push("🟢 model recovered: " + r.id);
       else if (r.status === "fail") await push("🔴 model down: " + r.id + " (" + r.note + ")");
       else if (r.status === "limit" && was === "ok") {
         await push("⚠️ free usage limit: " + r.id + " — recovers on its own");
@@ -190,11 +197,12 @@ async function section(opts) {
     return null;
   }
 
-  const icon = { ok: "✅", fail: "❌", limit: "⚠️", unknown: "❔" };
+  const icon = { ok: "✅", fail: "❌", limit: "⚠️", net: "🌐", unknown: "❔" };
   const lines = ["🩺 CHAIN HEALTH"];
   for (const r of results) {
     lines.push(icon[r.status] + " " + r.id + " · " +
       (r.status === "ok" ? r.ms + "ms" : r.note) +
+      (r.status === "net" ? " (network — not judged)" : "") +
       (r.current ? " ← current" : "") +
       (r.listed === false ? " · not in local list" : ""));
   }
@@ -208,7 +216,7 @@ async function section(opts) {
 function brief() {
   if (!state) state = load();
   if (!state || !state.prev) return null;
-  const icon = { ok: "✅", fail: "❌", limit: "⚠️", unknown: "❔" };
+  const icon = { ok: "✅", fail: "❌", limit: "⚠️", net: "🌐", unknown: "❔" };
   const cur = assistant.currentModel();
   const parts = [];
   for (const m of assistant.chain()) {
