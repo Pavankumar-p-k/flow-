@@ -8,6 +8,7 @@
    everything fresh. */
 const fs = require("fs");
 const path = require("path");
+const { writeAtomic } = require("./fsutil");
 
 const STATE_FILE = path.join(__dirname, "news-state.json");
 const UA = "agent-notch/1.0";
@@ -32,7 +33,7 @@ function load() {
   } catch { return null; }
 }
 function save() {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); }
+  try { writeAtomic(STATE_FILE, JSON.stringify(state, null, 2)); }
   catch (e) { logFn("news save err " + e.message); }
 }
 

@@ -10,4 +10,5 @@ ghwatch-state.json
 modelradar-state.json
 modelprobe-state.json
 news-state.json
+*.json.tmp
 chat-inbox/

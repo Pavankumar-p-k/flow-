@@ -9,6 +9,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { spawn } = require("child_process");
+const { writeAtomic } = require("./fsutil");
 const repos = require("./repos");
 const assistant = require("./assistant");
 const { runPs } = require("./psrun");
@@ -309,7 +310,7 @@ let reminders = [];
 try { reminders = JSON.parse(fs.readFileSync(REMINDERS_FILE, "utf8")) || []; } catch {}
 
 function saveReminders() {
-  try { fs.writeFileSync(REMINDERS_FILE, JSON.stringify(reminders)); } catch {}
+  try { writeAtomic(REMINDERS_FILE, JSON.stringify(reminders)); } catch {}
 }
 
 /* "in 10m ..." | "at 18:30 ..." | "tomorrow 9am ..." -> {at, rest} or null. */
@@ -391,7 +392,7 @@ try { digestState = Object.assign(digestState, JSON.parse(fs.readFileSync(DIGEST
 let digestTimer = null;
 
 function saveDigestState() {
-  try { fs.writeFileSync(DIGEST_STATE, JSON.stringify(digestState)); } catch {}
+  try { writeAtomic(DIGEST_STATE, JSON.stringify(digestState)); } catch {}
 }
 
 /* "digest auto" / "config digest auto" — drop the explicit schedule (both
@@ -586,7 +587,7 @@ try {
 
 function saveDnd() {
   try {
-    if (dndUntil > Date.now()) fs.writeFileSync(DND_FILE, JSON.stringify({ until: dndUntil }));
+    if (dndUntil > Date.now()) writeAtomic(DND_FILE, JSON.stringify({ until: dndUntil }));
     else if (fs.existsSync(DND_FILE)) fs.unlinkSync(DND_FILE);
   } catch {}
 }
@@ -764,7 +765,7 @@ function assistRateHit() {
 }
 
 function savePending() {
-  try { fs.writeFileSync(PENDING_FILE, JSON.stringify(pendingRaw)); } catch {}
+  try { writeAtomic(PENDING_FILE, JSON.stringify(pendingRaw)); } catch {}
 }
 
 function enqueue(label, fn) {

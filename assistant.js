@@ -5,6 +5,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { writeAtomic } = require("./fsutil");
 const { runPs } = require("./psrun");
 const sheettext = require("./sheettext");
 const { spawn } = require("child_process");
@@ -150,7 +151,7 @@ async function api(method, p, body) {
 /* ---------- session persistence ---------- */
 
 function persist() {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify({ sessionID })); } catch {}
+  try { writeAtomic(STATE_FILE, JSON.stringify({ sessionID })); } catch {}
 }
 
 function restore() {

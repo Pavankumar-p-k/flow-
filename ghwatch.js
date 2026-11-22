@@ -11,6 +11,7 @@
    60/h limit; GITHUB_TOKEN/GH_TOKEN in the env raises it to 5000/h. */
 const fs = require("fs");
 const path = require("path");
+const { writeAtomic } = require("./fsutil");
 
 const STATE_FILE = path.join(__dirname, "ghwatch-state.json");
 const INTERVAL_MS = 5 * 60 * 1000;
@@ -28,7 +29,7 @@ function load() {
   } catch { return null; }
 }
 function save() {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); }
+  try { writeAtomic(STATE_FILE, JSON.stringify(state, null, 2)); }
   catch (e) { logFn("ghwatch save err " + e.message); }
 }
 

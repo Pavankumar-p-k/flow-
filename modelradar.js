@@ -11,6 +11,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { writeAtomic } = require("./fsutil");
 
 const STATE_FILE = path.join(__dirname, "modelradar-state.json");
 const SERVICE_FILE = path.join(os.homedir(), ".local", "state", "opencode", "service.json");
@@ -30,7 +31,7 @@ function load() {
   } catch { return null; }
 }
 function save() {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); }
+  try { writeAtomic(STATE_FILE, JSON.stringify(state, null, 2)); }
   catch (e) { logFn("modelradar save err " + e.message); }
 }
 

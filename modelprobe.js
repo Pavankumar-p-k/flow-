@@ -10,6 +10,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { writeAtomic } = require("./fsutil");
 const assistant = require("./assistant");
 
 const STATE_FILE = path.join(__dirname, "modelprobe-state.json");
@@ -33,7 +34,7 @@ function load() {
   } catch { return null; }
 }
 function save() {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2)); }
+  try { writeAtomic(STATE_FILE, JSON.stringify(state, null, 2)); }
   catch (e) { logFn("modelprobe save err " + e.message); }
 }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
