@@ -4,6 +4,9 @@
      (Anthropic/DeepSeek have no usable RSS), deduped across runs
    - `news` command: bare / hn / <company> / bad name usage hint
    - the daily digest carries the newspaper
+   - A3: the headline page persists to news-state.json — brief() still
+     works after the cache is wiped, links() falls back to it offline,
+     and the `news` command warms the brief/links cache
    news-state.json, digest-state.json, config.json and queue-pending.json
    are shared with the live app -> snapshotted and restored. */
 const fs = require("fs");
@@ -123,6 +126,31 @@ function t(label, cond, extra) {
   }
   t("digest carries the newspaper", /📰 HACKER NEWS top 5/.test(paper), paper.slice(0, 500));
   t("digest still has the basics", /sessions:/.test(paper) && /📁 repos:/.test(paper), paper.slice(0, 500));
+
+  /* ---- 5. A3: persisted headline page survives a cache wipe ---- */
+  const realFetch = globalThis.fetch;
+  news.start({ send: async (x) => sent.push(String(x)), log: () => {} }); // wipes the cache
+  const b1 = news.brief();
+  t("brief falls back to persisted news after cache wipe",
+    /HN #1: T-five-hundred \(500\)/.test(b1 || ""), String(b1));
+  t("persisted brief carries the giants line",
+    /🏢 \d+ company headlines/.test(b1 || ""), String(b1));
+
+  /* the `news` command warms the cache again — links then need NO network */
+  await news.handle("hn");
+  let fetchCalls = 0;
+  globalThis.fetch = async () => { fetchCalls++; throw new Error("offline"); };
+  const lk1 = await news.links();
+  t("links use the warm cache without network", fetchCalls === 0 && lk1.length === 13,
+    fetchCalls + " calls, " + lk1.length + " links");
+
+  /* wipe the cache while offline -> links fall back to the persisted page */
+  news.start({ send: async () => {}, log: () => {} });
+  const lk2 = await news.links();
+  t("links fall back to persisted page when offline",
+    fetchCalls > 0 && lk2.length === 13 && lk2.some((x) => x.title === "T-five-hundred"),
+    fetchCalls + " calls, " + lk2.length + " links: " + JSON.stringify(lk2.slice(0, 2)));
+  globalThis.fetch = realFetch;
 
   console.log(process.exitCode ? "FAILED" : "ALL PASS");
   restoreAll();

@@ -150,6 +150,10 @@ function build(data, opts) {
     // crowd out tomorrow's paper
     for (const g of (data.giants || [])) seen.add(g.url);
     state.seen = [...seen].slice(-400);
+    // persist the headline page itself (A3): after a reboot the brief and
+    // `links` can still be built from disk, before any new collect
+    state.lastHn = hn.slice(0, 5);
+    state.lastGiants = (data.giants || []).slice(0, 10);
     save();
   }
   if (!hn.length && !giants.length) return null;
@@ -178,6 +182,7 @@ async function handle(arg) {
   if (!state) state = load() || { seen: [] };
   const a = String(arg || "").trim().toLowerCase();
   const data = await collect();
+  cache = { at: Date.now(), data }; // the command also warms the brief/links cache (A3)
   let hn = data.hn, giants = data.giants, giantsHead = null;
   if (a === "hn" || a === "hacker") {
     giants = [];
@@ -196,26 +201,44 @@ async function handle(arg) {
   catch (e) { logFn("news send err " + e.message); }
 }
 
+/* Last paper from disk — what brief/links fall back to when the
+   in-process cache is empty (fresh process, cache wiped by start()). */
+function persistedData() {
+  if (!state) state = load();
+  if (!state) return null;
+  const hn = Array.isArray(state.lastHn) ? state.lastHn : [];
+  const giants = Array.isArray(state.lastGiants) ? state.lastGiants : [];
+  return (hn.length || giants.length) ? { hn, giants } : null;
+}
+
 /* The paper's links, numbered for `open <n>` — last-collected data if we
-   have it (the digest/news command built it), fetched on demand otherwise. */
+   have it (the digest/news command built it), fetched on demand otherwise;
+   if the fetch fails or comes back empty, the persisted headline page. */
 async function links() {
   if (!state) state = load() || { seen: [] };
   let data = cache.data;
   if (!data) {
-    data = await collect();
-    cache = { at: Date.now(), data };
+    try {
+      data = await collect();
+      if (data && !((data.hn || []).length || (data.giants || []).length)) data = null; // offline: nothing fresh
+    } catch (e) { logFn("news links collect err " + e.message); data = null; }
+    if (data) cache = { at: Date.now(), data };
+    else data = persistedData();
   }
+  if (!data) return [];
   const out = [];
   for (const h of (data.hn || [])) out.push({ title: h.title, url: h.url, group: "hn" });
   for (const g of (data.giants || [])) out.push({ title: g.company + ": " + g.title, url: g.url, group: "giants" });
   return out;
 }
 
-/* One line for the daily brief — last-collected headlines, no network. */
+/* One line for the daily brief — last-collected headlines, no network;
+   falls back to the persisted page after a reboot (A3). */
 function brief() {
-  if (!cache.data) return null;
-  const hn = (cache.data.hn || [])[0];
-  const giants = cache.data.giants || [];
+  const data = cache.data || persistedData();
+  if (!data) return null;
+  const hn = (data.hn || [])[0];
+  const giants = data.giants || [];
   const parts = [];
   if (hn) parts.push("📰 HN #1: " + hn.title + " (" + hn.points + ")");
   if (giants.length) parts.push("🏢 " + giants.length + " company headlines");
