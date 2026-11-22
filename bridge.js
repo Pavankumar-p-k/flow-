@@ -293,6 +293,7 @@ const HELP = [
   "clipboard:  copy <text>  ·  clipboard / paste  (read it back)",
   "digest — the daily paper (auto: first laptop open of the day)",
   "digest at 18:00 — schedule instead · digest auto — back to first-open",
+  "digest status — mode · sent today? · last send",
   "brief — 8-line short summary of the day (summary · tldr)",
   "links — numbered paper links · open <n> | hn | giants | all (browser tabs)",
   "system:  \"how many tabs are open\" · \"what app is in front\"",
@@ -499,17 +500,31 @@ async function fmtDigest() {
   return lines.join("\n");
 }
 
-async function sendDigest() {
+async function sendDigest(now) {
   const text = await fmtDigest();
+  // A4: stamp the send time HERE — the one place every path funnels through
+  // (pump + manual). Written before the send loop, so a crash mid-send still
+  // records it; the clock-back guard below can then never double-fire.
+  digestState.lastAt = (now instanceof Date) ? now.getTime()
+    : (typeof now === "number" ? now : Date.now());
+  saveDigestState();
   log("digest sent (" + text.length + " chars)");
   for (const c of chunkReply(text)) await wa.send(c);
 }
 
 function pumpDigest(nowOverride) {
   if (!wa) return;
+  const now = nowOverride || new Date();
+  // A4 clock-back guard: a send stamped AHEAD of this pump's clock means
+  // time was rewound (manual clock change / sleep rollover) — re-pumping a
+  // past "day" must never fire another paper.
+  if (typeof digestState.lastAt === "number" && digestState.lastAt > now.getTime() + 60000) {
+    log("digest skipped: clock back (last " + new Date(digestState.lastAt).toTimeString() +
+      " ahead of pump " + now.toTimeString() + ")");
+    return;
+  }
   const cfg = digestCfg();
   if (!cfg.enabled) return;
-  const now = nowOverride || new Date();
   if (digestState.day === now.toDateString()) return;
   if (cfg.mode === "at") {
     // explicit schedule: fire at/after HH:MM (late is fine — boot catches up)
@@ -519,7 +534,7 @@ function pumpDigest(nowOverride) {
   }
   digestState.day = now.toDateString();
   saveDigestState(); // mark BEFORE sending — a crash can never double-send
-  sendDigest().catch((e) => log("digest err " + e.message));
+  sendDigest(now).catch((e) => log("digest err " + e.message));
 }
 
 /* ---------- brief (#11) — the whole day in ~8 lines ----------
@@ -1095,6 +1110,24 @@ async function routeIncoming(raw, text, files) {
         return enqueue("digest schedule", () =>
           wa.send("🗞 daily digest set to FIRST OPEN of the day — one paper the moment you open the laptop each day (never before 05:00)"));
       }
+      if (/^status$/i.test(arg)) { // A4: where the digest stands right now
+        const cfg = digestCfg();
+        const mode = !cfg.enabled ? "off"
+          : (cfg.mode === "at"
+            ? "at " + String(cfg.hour).padStart(2, "0") + ":" + String(cfg.minute).padStart(2, "0")
+            : "first-open (floor " + String(cfg.floor).padStart(2, "0") + ":00)");
+        let last = "never";
+        if (typeof digestState.lastAt === "number") {
+          const d = new Date(digestState.lastAt);
+          last = d.toDateString() + " " +
+            String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+        }
+        const todayStr = new Date().toDateString();
+        const sentToday = digestState.day === todayStr ||
+          (typeof digestState.lastAt === "number" && new Date(digestState.lastAt).toDateString() === todayStr);
+        return enqueue("digest status", () => wa.send(
+          "🗞 digest: " + mode + " · today: " + (sentToday ? "sent ✅" : "not yet") + " · last: " + last));
+      }
       const w = parseWhen(arg);
       if (w) {
         const d = new Date(w.at);
@@ -1107,11 +1140,9 @@ async function routeIncoming(raw, text, files) {
             " — auto-sends daily (late is fine if the PC was off)"));
       }
       return enqueue("digest", () =>
-        wa.send("⚠️ usage: digest (send now) · digest at 18:00 (schedule) · digest auto (first open)"));
+        wa.send("⚠️ usage: digest (send now) · digest at 18:00 (schedule) · digest auto (first open) · digest status"));
     }
-    return enqueue("digest", async () => {
-      for (const c of chunkReply(await fmtDigest())) await wa.send(c);
-    });
+    return enqueue("digest", () => sendDigest()); // manual send also stamps lastAt (A4)
   }
 
   switch (low) {

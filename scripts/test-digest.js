@@ -1,4 +1,8 @@
 /* Daily digest test (#8): manual send, reschedule, hour gating, once-a-day.
+   A4: all pump times are RELATIVE to the real clock (at()/fire below) so
+   the clock-back guard (lastAt ahead of pump time = time rewound) never
+   blocks the scheduled-send phases; bridge.stop() right after start kills
+   the every-minute pump race when the real time is already past 18:00.
    digest-state.json is shared with the running app — saved and restored. */
 const fs = require("fs");
 const path = require("path");
@@ -61,6 +65,21 @@ const state = {
 
 const digests = () => sent.filter((s) => s.includes("DAILY DIGEST"));
 
+/* relative pump times: at(dayOffset, h, m) on the real clock */
+const at = (off, h, m) => {
+  const d = new Date();
+  d.setDate(d.getDate() + off);
+  d.setHours(h, m, 0, 0);
+  return d;
+};
+/* the 18:00 send slot, pushed to tomorrow when today's is already past
+   (keeps every pump at/after the manual send's lastAt — no guard block) */
+function fireSlot() {
+  let d = at(0, 18, 0);
+  if (d.getTime() < Date.now() - 60000) d = at(1, 18, 0);
+  return d;
+}
+
 // sendDigest() scans 15+ repos AND builds the Tony/news sections (first
 // build does real network: model list, chain pings, HN + RSS — later sends
 // hit the 30-min module cache) — poll instead of guessing a fixed delay.
@@ -75,6 +94,7 @@ async function waitFor(fn, ms) {
 
 (async () => {
   await bridge.start({ whatsapp: fakeWa, getState: () => state, onEvent: () => {} });
+  bridge.stop(); // kill the every-minute pump: this test drives pumpDigest itself
 
   // manual send now
   await bridge.handleIncoming("digest");
@@ -89,23 +109,30 @@ async function waitFor(fn, ms) {
   t("reschedule confirms", sent.some((s) => s.includes("rescheduled to 18:00")), sent.join(" || "));
   t("config reflects new hour", bridge.digestCfg().hour === 18, JSON.stringify(bridge.digestCfg()));
 
-  // before the hour: nothing auto-fires
-  bridge.pumpDigest(new Date(2026, 10, 19, 8, 0));
+  // before the hour: nothing auto-fires (same day as the fire slot)
+  const fire = fireSlot();
+  const before = new Date(fire);
+  before.setHours(17, 59, 0, 0);
+  bridge.pumpDigest(before);
   await new Promise((r) => setTimeout(r, 500));
   t("no send before schedule", digests().length === 1, String(digests().length));
 
   // after the hour: exactly one auto-send
-  bridge.pumpDigest(new Date(2026, 10, 19, 19, 0));
+  bridge.pumpDigest(fire);
   await waitFor(() => digests().length >= 2);
   t("auto digest fires after hour", digests().length === 2, String(digests().length));
 
   // later that day: never twice
-  bridge.pumpDigest(new Date(2026, 10, 19, 20, 0));
+  const later = new Date(fire);
+  later.setHours(19, 0, 0, 0);
+  bridge.pumpDigest(later);
   await new Promise((r) => setTimeout(r, 500));
   t("once per day", digests().length === 2, String(digests().length));
 
   // next day (still past the rescheduled 18:00 hour): fires again
-  bridge.pumpDigest(new Date(2026, 10, 20, 19, 0));
+  const nextDay = new Date(fire);
+  nextDay.setDate(nextDay.getDate() + 1);
+  bridge.pumpDigest(nextDay);
   await waitFor(() => digests().length >= 3);
   t("fires again next day", digests().length === 3, String(digests().length));
 

@@ -9,6 +9,8 @@
    - `links` lists the paper's URLs numbered; `open <n|hn|giants|all>`
      opens them as browser tabs (openUrl injected by this test)
    - "open notepad" must NOT be captured (still reaches the assistant)
+   - A4: pump times are relative to the real clock; a rewound-day pump is
+     blocked by the clock-back guard; `digest status` reports mode/today/last
    All network is faked (weather/news/radar/probe) -> deterministic + fast.
    Shared state files are snapshotted and restored. */
 const fs = require("fs");
@@ -142,6 +144,15 @@ const state = {
 const digests = () => sent.filter((s) => s.includes("DAILY DIGEST"));
 const briefs = () => sent.filter((s) => s.includes("DAILY BRIEF"));
 
+/* A4: pump times are relative to the real clock — the clock-back guard
+   (lastAt ahead of the pump's clock) must never block these phases. */
+const at = (off, h, m) => {
+  const d = new Date();
+  d.setDate(d.getDate() + off);
+  d.setHours(h, m, 0, 0);
+  return d;
+};
+
 async function waitFor(fn, ms) {
   const end = Date.now() + (ms || 20000);
   while (Date.now() < end) {
@@ -176,17 +187,31 @@ async function waitFor(fn, ms) {
   } catch (e) { t("state override cleared", false, e.message); }
 
   /* ---- 2. first-open gating ---- */
-  bridge.pumpDigest(new Date(2026, 10, 21, 3, 0)); // 03:00 — under the floor
+  bridge.pumpDigest(at(0, 3, 0)); // 03:00 — under the floor
   await new Promise((r) => setTimeout(r, 500));
   t("quiet floor blocks 03:00", digests().length === 0, String(digests().length));
 
-  bridge.pumpDigest(new Date(2026, 10, 21, 8, 30)); // first open of the day
+  bridge.pumpDigest(at(0, 8, 30)); // first open of the day
   await waitFor(() => digests().length >= 1, 30000);
   t("first open sends the paper", digests().length === 1, String(digests().length));
 
-  bridge.pumpDigest(new Date(2026, 10, 21, 9, 0));
+  bridge.pumpDigest(at(0, 9, 0));
   await new Promise((r) => setTimeout(r, 400));
   t("same day never twice", digests().length === 1, String(digests().length));
+
+  /* A4: clock-back guard — a send is stamped ahead of this pump's clock
+     (time was rewound to yesterday) -> never another paper */
+  bridge.pumpDigest(at(-1, 12, 0));
+  await new Promise((r) => setTimeout(r, 400));
+  t("clock-back guard blocks a rewound day", digests().length === 1, String(digests().length));
+
+  /* A4: digest status — first-open mode, sent today, last send stamped */
+  await bridge.handleIncoming("digest status");
+  await waitFor(() => sent.some((s) => s.includes("digest: first-open")), 20000);
+  const st1 = sent.find((s) => s.includes("digest: first-open")) || "";
+  t("status shows first-open mode", /digest: first-open \(floor 05:00\)/.test(st1), st1);
+  t("status shows sent today", st1.includes("today: sent"), st1);
+  t("status shows the last send time", /last: \w+ \w+ \d{1,2} \d{4} \d{2}:\d{2}/.test(st1), st1);
 
   /* ---- 3. explicit schedule still works ---- */
   await bridge.handleIncoming("digest at 18:00");
@@ -194,11 +219,19 @@ async function waitFor(fn, ms) {
   t("digest at schedules", bridge.digestCfg().mode === "at" && bridge.digestCfg().hour === 18,
     JSON.stringify(bridge.digestCfg()));
 
-  bridge.pumpDigest(new Date(2026, 10, 20, 17, 59));
+  /* A4: status flips to the scheduled mode */
+  await bridge.handleIncoming("digest status");
+  await waitFor(() => sent.some((s) => s.includes("digest: at 18:00")), 20000);
+  const st2 = sent.find((s) => s.includes("digest: at 18:00")) || "";
+  t("status shows scheduled mode", /digest: at 18:00/.test(st2), st2);
+
+  // scheduled phases run on TOMORROW: today's first-open already marked the
+  // day, and tomorrow is always ahead of lastAt (no guard block)
+  bridge.pumpDigest(at(1, 17, 59));
   await new Promise((r) => setTimeout(r, 400));
   t("no send before the hour", digests().length === 1, String(digests().length));
 
-  bridge.pumpDigest(new Date(2026, 10, 20, 18, 0));
+  bridge.pumpDigest(at(1, 18, 0));
   await waitFor(() => digests().length >= 2, 30000);
   t("scheduled send fires", digests().length === 2, String(digests().length));
 
@@ -259,6 +292,7 @@ async function waitFor(fn, ms) {
   await waitFor(() => sent.some((s) => s.includes("NOTCH COMMANDS")));
   const help = sent.find((s) => s.includes("NOTCH COMMANDS")) || "";
   t("help has first-open digest", help.includes("first laptop open of the day"), help);
+  t("help has digest status", help.includes("digest status"), help);
   t("help has brief", help.includes("brief — 8-line short summary"), help);
   t("help has open tabs", help.includes("open <n> | hn | giants | all"), help);
 
