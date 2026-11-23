@@ -11,6 +11,8 @@
    - "open notepad" must NOT be captured (still reaches the assistant)
    - A4: pump times are relative to the real clock; a rewound-day pump is
      blocked by the clock-back guard; `digest status` reports mode/today/last
+   - A6: opens are awaited per tab — a failing open is reported as
+     "N of M tab(s) failed to open" instead of a fake success
    All network is faked (weather/news/radar/probe) -> deterministic + fast.
    Shared state files are snapshotted and restored. */
 const fs = require("fs");
@@ -130,6 +132,7 @@ function t(label, cond, extra) {
 
 const sent = [];
 const opened = [];
+const failUrls = new Set(); // A6: URLs whose open must fail
 const fakeWa = {
   send: async (text) => { sent.push(String(text)); console.log("  WA< " + String(text).replace(/\n/g, " | ").slice(0, 140)); },
   sendFile: async () => {},
@@ -165,7 +168,11 @@ async function waitFor(fn, ms) {
 (async () => {
   await bridge.start({
     whatsapp: fakeWa, getState: () => state, onEvent: () => {},
-    openUrl: (u) => { opened.push(String(u)); },
+    openUrl: (u) => {
+      const s = String(u);
+      if (failUrls.has(s)) throw new Error("simulated open failure"); // A6 -> counted
+      opened.push(s);
+    },
   });
   bridge.stop(); // kill the every-minute pump + ghwatch timer: deterministic test
 
@@ -286,6 +293,28 @@ async function waitFor(fn, ms) {
   await bridge.handleIncoming("open 99");
   await waitFor(() => sent.some((s) => s.includes("no link #99")));
   t("out-of-range link hinted", sent.some((s) => s.includes("no link #99")), sent.slice(-1)[0]);
+
+  /* ---- 5b. A6: a tab that fails to open is reported ---- */
+  failUrls.add(list[0].url);
+  let before6 = sent.length;
+  await bridge.handleIncoming("open 1");
+  await waitFor(() => sent.slice(before6).some((s) => s.includes("failed to open")));
+  t("failed open reported (single)",
+    sent.slice(before6).some((s) => s.includes("⚠️ 1 of 1 tab(s) failed to open")),
+    JSON.stringify(sent.slice(before6)));
+  t("failed open never counted as opened", !sent.slice(before6).some((s) => s.includes("opened 1 tab")),
+    JSON.stringify(sent.slice(before6)));
+
+  failUrls.clear();
+  failUrls.add(list[1].url); // one of the five HN tabs fails
+  before6 = sent.length;
+  await bridge.handleIncoming("open hn");
+  await waitFor(() => sent.slice(before6).some((s) => s.includes("failed to open")));
+  t("partial failure reports the count",
+    sent.slice(before6).some((s) => s.includes("⚠️ 1 of 5 tab(s) failed to open")),
+    JSON.stringify(sent.slice(before6)));
+  t("healthy tabs still opened", opened.length === 17 + 4, String(opened.length));
+  failUrls.clear();
 
   /* ---- 6. help carries the new commands ---- */
   await bridge.handleIncoming("help");

@@ -1358,10 +1358,11 @@ async function cmdWeather(arg) {
 
 /* links — list the paper's URLs numbered; open <sel> — open them as
    browser tabs (#11). Both read news.links() (the last-collected paper,
-   fetched on demand if it was never built). Opening goes through
-   runAction(browser): Electron shell in-process, PowerShell fallback —
-   unless a test injected its own openUrl. */
-let openUrl = null; // (url) => void — injected by tests; null = runAction
+   fetched on demand if it was never built). Opening AWAIT a real yes/no
+   per tab (A6): Electron shell's openExternal promise in-process,
+   PowerShell Start-Process fallback — unless a test injected its own
+   openUrl (a throw there counts as a failure too). */
+let openUrl = null; // (url) => void — injected by tests; null = shell/runAction
 
 async function sendLinks() {
   try {
@@ -1374,6 +1375,21 @@ async function sendLinks() {
   } catch (e) {
     return wa.send("⚠️ links failed: " + e.message);
   }
+}
+
+/* One tab, awaited to a real true/false (A6). */
+async function openOne(url) {
+  if (openUrl) {
+    try { openUrl(url); return true; }
+    catch (e) { log("openUrl err " + e.message); return false; }
+  }
+  let eshell = null;
+  try { const el = require("electron"); if (el && el.shell) eshell = el.shell; } catch {}
+  if (eshell) {
+    try { await eshell.openExternal(url); return true; } // rejects -> real failure
+    catch (e) { log("openExternal failed: " + e.message); return false; }
+  }
+  return runAction({ type: "browser", value: url }); // PowerShell fallback -> bool
 }
 
 async function openLinks(arg) {
@@ -1395,11 +1411,12 @@ async function openLinks(arg) {
   // dedupe — the same URL never opens twice in one go
   const seen = new Set();
   pick = pick.filter((l) => (seen.has(l.url) ? false : (seen.add(l.url), true)));
-  for (const l of pick) {
-    if (openUrl) { try { openUrl(l.url); } catch (e) { log("openUrl err " + e.message); } }
-    else runAction({ type: "browser", value: l.url });
-  }
-  log("opened " + pick.length + " link tab(s)");
+  // sequential awaits: tabs come up in paper order, each verdict is real
+  let ok = 0;
+  for (const l of pick) if (await openOne(l.url)) ok++;
+  const failed = pick.length - ok;
+  log("opened " + ok + "/" + pick.length + " link tab(s)");
+  if (failed) return wa.send("⚠️ " + failed + " of " + pick.length + " tab(s) failed to open");
   return wa.send(pick.length === 1
     ? "🔗 opened 1 tab — " + pick[0].title
     : "🔗 opened " + pick.length + " tabs in your browser");
