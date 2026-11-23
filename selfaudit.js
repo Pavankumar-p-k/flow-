@@ -4,14 +4,18 @@
    a known self-healing message; errors are grouped by signature and mapped
    to known fixes, anything unknown is flagged "needs review" — PROPOSED in
    the digest, never applied on its own. Feeds the 09:00 digest.
+   A5: the log is read as a BOUNDED tail (last 2MB via fsutil.readTail,
+   partial first line dropped) — an audit can never scan an unbounded file.
    audit(lines) is a pure function, exported for tests. */
-const fs = require("fs");
 const path = require("path");
+const { readTail } = require("./fsutil");
 
 const LOG_FILE = path.join(__dirname, "debug.log");
+const TAIL_BYTES = 2 * 1024 * 1024; // A5: at most the last 2MB
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 const TTL_MS = 10 * 60 * 1000;
 let cache = { at: 0, text: null };
+let logFile = LOG_FILE; // overridable for the bounded-tail test
 
 // error-looking lines that are actually us healing ourselves — never report
 const SELF_HEALED = [
@@ -56,6 +60,20 @@ function fixFor(sample) {
   return null;
 }
 
+/* Last 2MB of the log -> the lines inside the 24h window (null = no log).
+   The bounded read is the whole point of A5: a multi-MB debug.log costs
+   the same few ms every time, and the dropped partial first line can
+   never fabricate a finding. */
+function recentLines() {
+  const raw = readTail(logFile, TAIL_BYTES);
+  if (raw == null) return null;
+  const cut = Date.now() - WINDOW_MS;
+  return raw.split("\n").filter((l) => {
+    const ts = Date.parse(l.slice(0, 24));
+    return Number.isFinite(ts) && ts >= cut;
+  });
+}
+
 /* Pure classifier: { errors: [{n, label, fix}], benign } */
 function audit(lines) {
   const groups = new Map();
@@ -79,13 +97,8 @@ async function section(opts) {
   if (!opts || !opts.fresh) {
     if (cache.text !== null && Date.now() - cache.at < TTL_MS) return cache.text;
   }
-  let raw;
-  try { raw = fs.readFileSync(LOG_FILE, "utf8"); } catch { return null; }
-  const cut = Date.now() - WINDOW_MS;
-  const lines = raw.split("\n").filter((l) => {
-    const ts = Date.parse(l.slice(0, 24));
-    return Number.isFinite(ts) && ts >= cut;
-  });
+  const lines = recentLines();
+  if (!lines) return null;
   const a = audit(lines);
   const out = ["🔧 SELF-AUDIT (24h)"];
   if (!a.errors.length) {
@@ -102,16 +115,11 @@ async function section(opts) {
   return text;
 }
 
-/* One line for the daily brief — same classifier over the last 24h,
-   local file only (a few ms), no cache. */
+/* One line for the daily brief — same classifier over the last 24h of the
+   bounded tail, local file only (a few ms), no cache. */
 function brief() {
-  let raw;
-  try { raw = fs.readFileSync(LOG_FILE, "utf8"); } catch { return null; }
-  const cut = Date.now() - WINDOW_MS;
-  const lines = raw.split("\n").filter((l) => {
-    const ts = Date.parse(l.slice(0, 24));
-    return Number.isFinite(ts) && ts >= cut;
-  });
+  const lines = recentLines();
+  if (!lines) return null;
   const a = audit(lines);
   if (!a.errors.length) return "🔧 audit: clean (" + a.benign + " benign lines)";
   const top = a.errors[0];
@@ -121,4 +129,4 @@ function brief() {
 
 function start() { cache = { at: 0, text: null }; }
 
-module.exports = { start, section, brief, audit, LOG_FILE };
+module.exports = { start, section, brief, audit, LOG_FILE, _setLog: (f) => { logFile = f || LOG_FILE; } };

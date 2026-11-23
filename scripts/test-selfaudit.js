@@ -4,9 +4,13 @@
      benign — including POLL lines that carry err= (those ARE findings)
    - unknown signatures get fix=null -> "needs review" in the paper
    - section() reads the real debug.log and never throws
+   - A5: bounded tail read — only the last 2MB of a >2MB log is audited
+     (an error older than the tail is not reported; the tail's own recent
+     error is), so an audit can never scan an unbounded file
    audit() is pure, so no shared files are touched. */
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 
 const selfaudit = require("../selfaudit");
 
@@ -65,6 +69,37 @@ function t(label, cond, extra) {
       /clean — no errors|⚠ \d+×/.test(s || ""), s);
   } else {
     t("no log -> no section", s === null, JSON.stringify(s));
+  }
+
+  /* ---- A5: bounded tail — only the last 2MB of a >2MB log is audited ---- */
+  const tmpLog = path.join(os.tmpdir(), "audit-tail-test.log");
+  try {
+    const hourAgo = new Date(Date.now() - 3600 * 1000).toISOString(); // inside 24h
+    const head =
+      hourAgo + " INTRO early spawn error: spawn notepad ENOSPC os error 5\n" + // recent, but >2MB from the end
+      hourAgo + " POLL online=true sessions=3 stats=true\n";
+    const filler = ("FILLER filler filler filler filler filler filler filler\n").repeat(39000); // ~2.2MB, no error tokens
+    const tailLines =
+      hourAgo + " LOAD_FAIL -3 File not found\n" + // recent AND inside the tail
+      hourAgo + " POLL online=true sessions=1 stats=true\n";
+    fs.writeFileSync(tmpLog, head + filler + tailLines);
+    t("test log is bigger than the 2MB tail", fs.statSync(tmpLog).size > 2 * 1024 * 1024,
+      String(fs.statSync(tmpLog).size));
+
+    selfaudit._setLog(tmpLog);
+    const s2 = await selfaudit.section({ fresh: true });
+    t("tail section built", /^🔧 SELF-AUDIT \(24h\)\n/.test(s2 || ""), String(s2).slice(0, 200));
+    t("recent error inside the tail is reported", /LOAD_FAIL/.test(s2 || ""), s2);
+    t("recent error older than the tail is out of scope", !/spawn error/.test(s2 || ""), s2);
+    const b2 = selfaudit.brief();
+    t("brief audits the same tail", /LOAD_FAIL/.test(b2 || "") && !/spawn error/.test(b2 || ""), b2);
+    const missing = path.join(os.tmpdir(), "audit-tail-missing.log");
+    selfaudit._setLog(missing);
+    t("missing log -> no section", await selfaudit.section({ fresh: true }) === null);
+    t("missing log -> no brief line", selfaudit.brief() === null);
+  } finally {
+    selfaudit._setLog(null); // back to the real debug.log
+    try { fs.unlinkSync(tmpLog); } catch {}
   }
 
   console.log(process.exitCode ? "FAILED" : "ALL PASS");
