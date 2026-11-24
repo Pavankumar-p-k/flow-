@@ -11,4 +11,5 @@ modelradar-state.json
 modelprobe-state.json
 news-state.json
 *.json.tmp
+docs/_frames/
 chat-inbox/
