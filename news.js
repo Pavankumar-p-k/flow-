@@ -151,9 +151,11 @@ function build(data, opts) {
     for (const g of (data.giants || [])) seen.add(g.url);
     state.seen = [...seen].slice(-400);
     // persist the headline page itself (A3): after a reboot the brief and
-    // `links` can still be built from disk, before any new collect
-    state.lastHn = hn.slice(0, 5);
-    state.lastGiants = (data.giants || []).slice(0, 10);
+    // `links` can still be built from disk, before any new collect. An
+    // EMPTY collect (boot before the network is up) must never clobber a
+    // good page — only replace it when we really have headlines.
+    if (hn.length) state.lastHn = hn.slice(0, 5);
+    if ((data.giants || []).length) state.lastGiants = (data.giants || []).slice(0, 10);
     save();
   }
   if (!hn.length && !giants.length) return null;
@@ -213,14 +215,16 @@ function persistedData() {
 
 /* The paper's links, numbered for `open <n>` — last-collected data if we
    have it (the digest/news command built it), fetched on demand otherwise;
-   if the fetch fails or comes back empty, the persisted headline page. */
+   an empty cache or a failed/empty fetch falls back to the persisted page. */
 async function links() {
   if (!state) state = load() || { seen: [] };
+  const usable = (d) => !!d && ((d.hn || []).length > 0 || (d.giants || []).length > 0);
   let data = cache.data;
+  if (!usable(data)) data = null; // empty cache = nothing to list
   if (!data) {
     try {
       data = await collect();
-      if (data && !((data.hn || []).length || (data.giants || []).length)) data = null; // offline: nothing fresh
+      if (!usable(data)) data = null; // offline: nothing fresh
     } catch (e) { logFn("news links collect err " + e.message); data = null; }
     if (data) cache = { at: Date.now(), data };
     else data = persistedData();
@@ -233,9 +237,12 @@ async function links() {
 }
 
 /* One line for the daily brief — last-collected headlines, no network;
-   falls back to the persisted page after a reboot (A3). */
+   an empty cache falls back to the persisted page after a reboot or an
+   offline boot (A3). */
 function brief() {
-  const data = cache.data || persistedData();
+  const usable = (d) => !!d && ((d.hn || []).length > 0 || (d.giants || []).length > 0);
+  let data = cache.data;
+  if (!usable(data)) data = persistedData();
   if (!data) return null;
   const hn = (data.hn || [])[0];
   const giants = data.giants || [];

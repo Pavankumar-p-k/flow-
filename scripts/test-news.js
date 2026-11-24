@@ -150,6 +150,17 @@ function t(label, cond, extra) {
   t("links fall back to persisted page when offline",
     fetchCalls > 0 && lk2.length === 13 && lk2.some((x) => x.title === "T-five-hundred"),
     fetchCalls + " calls, " + lk2.length + " links: " + JSON.stringify(lk2.slice(0, 2)));
+
+  /* an offline section must NOT clobber the persisted page with empties
+     (the 06:18 boot-before-network case), and brief/links must treat an
+     empty cache as "nothing here" -> persisted fallback again */
+  const s3 = await news.section({ fresh: true });
+  t("offline section returns no paper", s3 === null, String(s3));
+  t("offline section keeps the persisted page",
+    /HN #1: T-five-hundred \(500\)/.test(news.brief() || ""), String(news.brief()));
+  const lk3 = await news.links();
+  t("links survive an empty cached collect",
+    lk3.length === 13 && lk3.some((x) => x.title === "T-five-hundred"), String(lk3.length));
   globalThis.fetch = realFetch;
 
   console.log(process.exitCode ? "FAILED" : "ALL PASS");
