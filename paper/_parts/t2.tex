@@ -1,0 +1,221 @@
+
+% ============================================================
+\section{Research Methodology}
+% ============================================================
+
+\subsection{Design Approach}
+
+The project follows an iterative engineering design cycle:
+requirements were derived from the deficiencies in
+Section~I-B, an architecture was specified, each module was
+implemented and exercised through automated tests, and evaluation
+fed back into hardening. Requirements are stated as testable
+claims (e.g., ``the overlay never uses \texttt{win.hide()}''),
+so that every documented behaviour is backed by an executable
+check rather than by inspection alone.
+
+\subsection{Technology Selection}
+
+Table~\ref{tab:stack} lists the selected technologies and the
+criteria behind each choice.
+
+\begin{table}[t]
+\centering\small
+\caption{Technology selection and criteria}\label{tab:stack}
+\begin{tabular}{@{}p{0.26\columnwidth}p{0.44\columnwidth}p{0.22\columnwidth}@{}}
+\toprule
+\textbf{Layer} & \textbf{Technology} & \textbf{Criterion} \\
+\midrule
+Overlay UI & Electron transparent window &
+Native click-through, CSS control \\
+Remote channel & WhatsApp Web bridge &
+Phone-first, no new app to install \\
+Inference (hosted) & OpenCode session API &
+Existing account, free-tier models \\
+Inference (cloud) & OpenAI-compatible endpoints &
+One client, many providers \\
+Inference (local) & Ollama (localhost) &
+Offline availability \\
+Scheduling & Windows Task Scheduler &
+Survives logout/reboot \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The OpenAI-compatible criterion deserves emphasis: a single
+HTTP client speaking the de-facto \texttt{/v1/chat/completions}
+dialect covers OpenAI, OpenRouter, DeepSeek, Groq and any
+self-hosted gateway, which is what makes ``works with all
+providers'' an architectural property rather than a per-vendor
+integration project.
+
+\subsection{Evaluation Corpus}
+
+Because the contribution is a system rather than a statistical
+model, the evaluation corpus is the project's automated test
+suite together with controlled failure injections:
+
+\begin{itemize}
+  \item \textbf{Test suite:} 27 modules under
+  \texttt{scripts/test-*.js}, each driving one subsystem through
+  its public interface (queue discipline, permission gating,
+  digest generation, news parsing, model probing, repository
+  watching, media control, self-audit, screenshot gallery, and
+  overlay mode transitions).
+  \item \textbf{Failure injections:} (i)~provider quota
+  exhaustion --- the session API rejects with a credit error;
+  (ii)~service unreachable --- \texttt{ECONNREFUSED} on the local
+  service port; (iii)~network loss --- \texttt{ENOTFOUND} on
+  external hosts. Each injection asserts that a reply is still
+  produced by the next tier of the chain.
+  \item \textbf{Operational telemetry:} the append-only debug log
+  records every prompt, fallback decision, queue transition and
+  watchdog action, providing the qualitative evidence used in
+  Section~V.
+\end{itemize}
+
+\subsection{Exclusion Criteria}
+
+Behaviours not demonstrated by a passing test are excluded from
+reported results. Non-deterministic demonstrations (manual
+click-throughs, one-off screenshots) are treated as illustrative
+only. This mirrors the exclusion of non-peer-reviewed sources in
+a conventional literature review: only evidence that can be
+re-executed is counted.
+
+% ============================================================
+\section{Analysis of the System}
+% ============================================================
+
+The analysis follows two thematic parts: the \emph{performance
+metrics} the system is built to optimize
+(Section~IV-A) and the \emph{inference tiers and modules} that
+realize them (Section~IV-B).
+
+\subsection{Performance Metrics}
+
+Goals are grouped into three families, mirroring the three
+prediction targets of classic educational-data studies
+(completion, grades, at-risk early warning) but instantiated as
+system-level service metrics.
+
+\subsubsection{Availability \& Continuity (completion analog)}
+\begin{itemize}
+  \item \textbf{Reply availability:} fraction of user prompts
+  that receive a substantive reply rather than an error. The
+  design target is 100\% while at least one tier is reachable,
+  and a non-error deterministic answer when none is.
+  \item \textbf{Offline-path success rate:} under injected
+  network loss, share of prompts answered by the local or
+  deterministic tier.
+  \item \textbf{Watchdog recovery time:} elapsed time between a
+  host-process death and the scheduled relaunch; the watchdog
+  runs every minute with missed-run recovery enabled, bounding
+  recovery to one scheduling interval after wake.
+\end{itemize}
+
+\subsubsection{Responsiveness (grades analog)}
+\begin{itemize}
+  \item \textbf{Reply latency:} prompt-to-first-reply time per
+  tier (hosted $<$ cloud $<$ local in typical measurements).
+  \item \textbf{Queue throughput:} completions per minute under
+  sustained phone traffic; the strict FIFO with capacity
+  $Q_{max}=8$ bounds memory and gives the operator an explicit
+  back-pressure signal (``queue full'') instead of silent
+  unbounded growth.
+  \item \textbf{Digest freshness:} age of the newest persisted
+  news item at delivery time.
+\end{itemize}
+
+\subsubsection{Safety \& Reliability (at-risk analog)}
+\begin{itemize}
+  \item \textbf{Permission-gating coverage:} share of
+  consequential actions (shell commands, file sends, provider
+  changes) that pass through an \emph{allow/always/reject}
+  prompt before execution; \emph{always} whitelists are recorded
+  so the audit trail shows why an action ran without a prompt.
+  \item \textbf{Execution exclusivity:} invariant that at most
+  one action executes at a time --- verified by the queue test.
+  \item \textbf{Test pass rate:} aggregate result of the
+  27-module suite, used as the primary regression metric.
+\end{itemize}
+
+\subsection{Inference Tiers \& System Modules}
+
+\subsubsection{Provider-Agnostic Fallback Chain}
+
+The inference layer is a four-tier chain
+(Fig.~\ref{fig:chain}); on failure at tier $n$ the router
+advances to $n{+}1$ and records the reason in the debug log.
+
+\begin{figure}[t]
+\centering
+\begin{tikzpicture}[
+  node distance=6mm and 2mm,
+  tier/.style={draw, rounded corners=3pt, align=center,
+    minimum width=0.92\columnwidth, inner sep=5pt,
+    fill=blue!6},
+  fail/.style={-{Stealth[length=2mm]}, dashed, gray!70!black,
+    font=\scriptsize}
+]
+\node[tier] (t1) {\textbf{Tier 1 --- Hosted session}\\
+OpenCode session API · free models
+(\texttt{mimo}, \texttt{deepseek}, \texttt{hy4}) with in-chain
+rotation};
+\node[tier, below=of t1] (t2) {\textbf{Tier 2 --- OpenAI-compatible cloud}\\
+OpenRouter / DeepSeek / Groq / any
+\texttt{baseURL} + key};
+\node[tier, below=of t2] (t3) {\textbf{Tier 3 --- Local runtime}\\
+Ollama at \texttt{127.0.0.1:11434}};
+\node[tier, below=of t3] (t4) {\textbf{Tier 4 --- Deterministic offline}\\
+Status, cached weather/news, queue state};
+\draw[fail] (t1) -- node[right]{4xx/credit} (t2);
+\draw[fail] (t2) -- node[right]{5xx/timeout} (t3);
+\draw[fail] (t3) -- node[right]{no daemon} (t4);
+\end{tikzpicture}
+\caption{Four-tier provider-agnostic fallback chain. A failure
+at any tier advances the router and is logged with its
+reason.}\label{fig:chain}
+\end{figure}
+
+Tier~1 rotates across hosted free models when a quota error is
+detected, preserving the historical behaviour of the project;
+Tier~2 is provider-generic by construction (one HTTP dialect);
+Tier~3 restores full generativity without any network path;
+Tier~4 never fails because it performs no I/O beyond reading
+state the system already holds. The chain is evaluated in
+Section~V.
+
+\subsubsection{Feature Modules}
+
+Table~\ref{tab:modules} maps each service module to its
+responsibility and its governing test.
+
+\begin{table}[t]
+\centering\small
+\caption{Service modules and governing tests}\label{tab:modules}
+\begin{tabular}{@{}p{0.24\columnwidth}p{0.46\columnwidth}p{0.2\columnwidth}@{}}
+\toprule
+\textbf{Module} & \textbf{Responsibility} & \textbf{Test} \\
+\midrule
+Overlay & Pill/panel, hover expand, pin, dim modes & \texttt{ctrl} \\
+Bridge & FIFO queue, commands, permission prompts & \texttt{queue}, \texttt{permission} \\
+Assistant & Session, fallback chain, replies & \texttt{continue}, \texttt{actions} \\
+News & HN + RSS $\rightarrow$ digest packs & \texttt{news}, \texttt{digest} \\
+Weather & Forecast + offline cache & \texttt{weather} \\
+GitHub watch & Issues/PRs/CI glow alerts & \texttt{ghwatch} \\
+Model probe & Health of each provider tier & \texttt{modelprobe} \\
+Media & Transport keys, now-playing pill & (media keys) \\
+Self-audit & Log tail anomaly reader & \texttt{selfaudit} \\
+Watchdog & Scheduled relaunch + battery policy & registration script \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The human-in-the-loop path is deliberately narrow: a phone
+message enters the bounded queue, at most one action executes,
+consequential actions surface a permission prompt, and the
+resolution (including \emph{always} rules) is appended to the
+audit log. Drag-and-drop file sends and screenshot forwards
+reuse the same gated channel rather than opening a second,
+ungated path.

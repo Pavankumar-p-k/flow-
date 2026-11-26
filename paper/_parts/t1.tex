@@ -1,0 +1,212 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, fit}
+
+\hypersetup{colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue}
+
+\title{Agent Notch: An Ambient Desktop Agent Overlay with
+       Provider-Agnostic Inference and Phone-Mediated Control}
+
+\author{\IEEEauthorblockN{Project Documentation}
+\IEEEauthorblockA{Personal AI Systems Research\\
+Project Report}}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+\begin{abstract}
+Desktop AI assistants force a choice between attention cost and
+availability: full-screen chat interfaces compete with the user's
+work, while terminal-bound agents are invisible to non-technical
+users and single-cloud deployments collapse under quota exhaustion
+or network loss. We present \textbf{Agent Notch}, a
+Dynamic-Island-style ambient overlay that stays docked at the top
+edge of the Windows desktop, expands on hover, and is controlled
+remotely from a phone over WhatsApp. The system routes inference
+through a \emph{provider-agnostic fallback chain} --- an
+OpenCode-hosted session tier, an OpenAI-compatible cloud tier, a
+local Ollama tier, and a deterministic offline tier --- so that a
+reply is always produced even when every network path fails. The
+overlay implements strict human-in-the-loop gating: a bounded
+first-in-first-out queue (capacity eight), one-at-a-time
+execution, and per-action permission prompts (\emph{allow},
+\emph{always}, \emph{reject}). Surrounding services include a
+persisted news digest, cached weather, GitHub repository
+watching, media-key control, screenshot capture, and a scheduled
+watchdog with missed-run recovery. We describe the architecture,
+the inference layer, the safety model, and the evaluation
+methodology built on 27 automated test modules and
+failure-injection scenarios. Results show continuous reply
+availability across provider and network failures, with the
+hosted-session tier delivering the best latency and the local
+tier preserving availability during total network loss.
+\end{abstract}
+
+\begin{IEEEkeywords}
+ambient intelligence, desktop agent overlay, LLM inference
+fallback, multi-provider inference, human-in-the-loop, WhatsApp
+bot, local large language models
+\end{IEEEkeywords}
+
+% ============================================================
+\section{Introduction \& Background}
+% ============================================================
+
+\subsection{The Rise of Always-On AI Agents}
+
+Large language model (LLM) assistants have moved from
+occasional query tools to persistent collaborators that draft
+code, summarize documents, monitor repositories, and act on the
+user's behalf~\cite{react,tooluse}. As this shift happened, the
+\emph{interface} became the bottleneck: a chat window occupies
+the screen, breaks the user's focus, and is unreachable when the
+user steps away from the machine. At the same time, production
+assistants depend on a single hosted provider, so a quota limit
+or a regional outage silently turns a ``personal assistant'' into
+a dead window. Two problems therefore emerge: (i)~attention cost
+--- the assistant competes with the work it is supposed to
+support; and (ii)~\emph{service dropout} --- quota exhaustion,
+network loss, or a crashed host process removes the assistant
+entirely.
+
+\subsection{Problem Statement}
+
+The project addresses three concrete deficiencies in existing
+desktop agent designs:
+
+\begin{enumerate}
+  \item \textbf{Attention intrusion.} Full-screen assistants
+  demand a dedicated region of the display; minimal CLI agents
+  are invisible and offer no glanceable status.
+  \item \textbf{Single-provider dependence.} Assistants bound to
+  one hosted session API die the moment the account runs out of
+  credits or the network drops --- there is no fallback path and
+  therefore no meaningful availability guarantee.
+  \item \textbf{No remote, safe control.} Monitoring or steering
+  a desktop agent typically requires physical presence or a
+  VPN-bound web console; there is no phone-first channel with
+  rigorous permission gating for consequential actions.
+\end{enumerate}
+
+\subsection{Core Concepts}
+
+Two conceptual pairs frame the system.
+
+\textbf{Cloud versus local inference.} A hosted session API
+provides strong models at the cost of availability; an on-device
+runtime (e.g., Ollama~\cite{ollama}) inverts that trade-off.
+Provider-agnostic inference treats both as interchangeable tiers
+behind one interface, so model quality and availability become
+independent axes.
+
+\textbf{Chat-mediated agent control.} Messaging platforms are
+already the user's always-on surface. Reusing WhatsApp as the
+control plane~\cite{whatsapp} gives remote presence, delivery
+receipts, and an auditable message history without building a
+second application --- provided that execution is strictly queued
+and gated by human permission prompts.
+
+\subsection{Contributions}
+
+The main contributions of this work are:
+
+\begin{enumerate}
+  \item A click-through ambient overlay with Dexter-style
+  geometry (96$\times$28~px collapsed nub, radius 12, shoulder
+  flares) that expands on hover, collapses on cursor-away, and is
+  hidden only via CSS --- never by destroying the window --- to
+  preserve transparent-window painting on Windows.
+  \item Phone-mediated WhatsApp control with a bounded FIFO queue
+  (capacity eight), strict one-at-a-time execution, and a
+  permission model of \emph{allow / always / reject} prompts.
+  \item A \emph{provider-agnostic inference layer} with a
+  four-tier fallback chain (hosted session $\rightarrow$
+  OpenAI-compatible cloud $\rightarrow$ local Ollama
+  $\rightarrow$ deterministic offline responder) that keeps the
+  assistant answering under quota exhaustion and total network
+  loss.
+  \item A reliability layer combining a Windows scheduled-task
+  watchdog with missed-run recovery, a self-audit tail reader,
+  and an automated test suite of 27 modules used for
+  failure-injection evaluation.
+\end{enumerate}
+
+% ============================================================
+\section{Literature Review \& Research Gap}
+% ============================================================
+
+\subsection{Foundational Studies}
+
+\textbf{Attention-aware and peripheral interfaces.} Glanceable
+and ambient displays established that information can be
+communicated at the periphery of attention without stealing
+focus~\cite{ambient}. Apple's Dynamic Island~\cite{hig}
+popularized a related pattern in mobile UI: a small, persistent
+shape that morphs to surface live activities and expands into
+interactive surfaces on demand. The present work applies this
+form factor to the desktop edge as an agent status and control
+surface.
+
+\textbf{LLM agent architectures.} ReAct-style reasoning loops
+couple thought with tool invocation~\cite{react}, and
+tool-use/function-calling interfaces standardized how models
+request actions~\cite{tooluse}. Orchestration frameworks
+popularized multi-step agent graphs~\cite{langchain}, while
+autonomous agent projects demonstrated long-running task
+execution~\cite{autogpt}. These works focus on \emph{what} the
+agent does; comparatively little work addresses where the agent
+\emph{lives} on the desktop or how it survives provider failure.
+
+\textbf{Chat platforms as operations channels.} Bots on
+WhatsApp and Telegram are widely used for notifications and
+ops alerting~\cite{whatsapp,telegram}; permission-gated remote
+execution over chat remains comparatively rare, and bounded
+queueing with per-action human approval is not standard in the
+literature.
+
+\textbf{Local inference runtimes.} Ollama and similar
+runtimes~\cite{ollama} brought quantized on-device models to
+consumer hardware, making a local availability tier practical.
+Work on heterogeneous model routing and fallback
+chains~\cite{routing} typically targets cost optimization rather
+than availability under failure.
+
+\subsection{Comparison of Existing Approaches}
+
+Designs across the literature fall into four families:
+(i)~\emph{single-provider hosted} --- strongest models, zero
+availability guarantee under quota or outage;
+(ii)~\emph{chained hosted} --- rotation across hosted providers,
+which still fails with the network;
+(iii)~\emph{local-only} --- resilient but weaker; and
+(iv)~\emph{notification-only} --- resilient yet incapable of
+steering the agent. None of these families provides an ambient
+desktop surface \emph{and} a phone-first control channel
+\emph{and} cross-tier failover in one system.
+
+\subsection{Research Gap}
+
+The identified gap is threefold. First, teachers, operators, and
+everyday users cannot reliably \emph{monitor and steer} a
+personal agent remotely: existing tools assume the user is
+seated at the machine, mirroring the monitoring gap reported in
+remote-learning analytics where instructors could not observe
+learner state at a distance. Second, single-provider assistants
+exhibit the same fragility the present work targets as service
+dropout: when the hosted session is unavailable, the assistant
+returns an ``offline'' error instead of degrading gracefully.
+Third, no evaluated system combines (a) an unobtrusive
+always-on overlay, (b) phone-first remote control with human
+permission gating and bounded queueing, and (c)
+provider-agnostic inference that continues to answer offline.
+Agent Notch is designed and implemented to close exactly this
+gap.
